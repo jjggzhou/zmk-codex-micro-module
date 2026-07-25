@@ -60,7 +60,7 @@ static const struct codex_input_mapping event_mappings[] = {
 K_MSGQ_DEFINE(input_event_queue, sizeof(struct codex_input_item),
               CONFIG_CODEX_INPUT_EVENT_QUEUE_DEPTH, 4);
 
-static int process_one(void)
+static bool process_one(void)
 {
     struct codex_input_item item;
     const struct codex_input_mapping *mapping;
@@ -68,25 +68,27 @@ static int process_one(void)
     int len;
 
     if (k_msgq_get(&input_event_queue, &item, K_NO_WAIT) != 0) {
-        return -ENOMSG;
+        return false;
     }
     if (item.event >= CODEX_INPUT_EVENT_COUNT) {
-        return -EINVAL;
+        return true;
     }
     mapping = &event_mappings[item.event];
     len = snprintk((char *)json, sizeof(json),
                    "{\"m\":\"v.oai.hid\",\"p\":{\"k\":\"%s\",\"act\":%u,\"ag\":%u}}",
                    mapping->id, item.pressed ? 1U : 0U, mapping->agent_index);
     if (len < 0 || len >= (int)sizeof(json)) {
-        return -EMSGSIZE;
+        return true;
     }
-    return codex_router_send_json(CODEX_CHANNEL_RPC, json, (size_t)len);
+    /* Dispatch errors consume this owned event; only dequeue controls draining. */
+    (void)codex_router_send_json(CODEX_CHANNEL_RPC, json, (size_t)len);
+    return true;
 }
 
 static void input_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-    while (process_one() != -ENOMSG) {
+    while (process_one()) {
     }
 }
 

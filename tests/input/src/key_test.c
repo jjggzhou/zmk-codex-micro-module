@@ -15,9 +15,22 @@
 static char sent[CAPTURE_MAX][80];
 static size_t sent_count;
 static int router_result;
+static int router_scripted_results[CAPTURE_MAX];
+static size_t router_scripted_count;
 static bool block_router;
 K_SEM_DEFINE(router_entered, 0, 1);
 K_SEM_DEFINE(router_release, 0, 1);
+K_SEM_DEFINE(blocker_entered, 0, 1);
+K_SEM_DEFINE(blocker_release, 0, 1);
+
+static void system_work_blocker(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    k_sem_give(&blocker_entered);
+    (void)k_sem_take(&blocker_release, K_FOREVER);
+}
+
+K_WORK_DEFINE(blocker_work, system_work_blocker);
 
 int codex_router_send_json(enum codex_channel channel, const uint8_t *json,
                            size_t len)
@@ -32,6 +45,9 @@ int codex_router_send_json(enum codex_channel channel, const uint8_t *json,
         k_sem_give(&router_entered);
         (void)k_sem_take(&router_release, K_FOREVER);
     }
+    if (sent_count <= router_scripted_count) {
+        return router_scripted_results[sent_count - 1U];
+    }
     return router_result;
 }
 
@@ -41,9 +57,13 @@ static void reset_case(void *fixture)
     memset(sent, 0, sizeof(sent));
     sent_count = 0U;
     router_result = 0;
+    memset(router_scripted_results, 0, sizeof(router_scripted_results));
+    router_scripted_count = 0U;
     block_router = false;
     k_sem_reset(&router_entered);
     k_sem_reset(&router_release);
+    k_sem_reset(&blocker_entered);
+    k_sem_reset(&blocker_release);
     codex_input_test_reset();
 }
 
@@ -186,6 +206,20 @@ ZTEST(input, test_router_error_does_not_stop_the_production_worker)
     wait_for_events(1U);
     router_result = 0;
     zassert_ok(codex_input_key("ACT11", true, 0U));
+    wait_for_events(2U);
+    assert_event(0U, "ACT10", 1U, 0U);
+    assert_event(1U, "ACT11", 1U, 0U);
+}
+
+ZTEST(input, test_router_enomsg_consumes_only_its_event_and_drains_fifo)
+{
+    zassert_true(k_work_submit(&blocker_work) >= 0);
+    zassert_ok(k_sem_take(&blocker_entered, K_MSEC(100)));
+    router_scripted_results[0] = -ENOMSG;
+    router_scripted_count = 1U;
+    zassert_ok(codex_input_key("ACT10", true, 0U));
+    zassert_ok(codex_input_key("ACT11", true, 0U));
+    k_sem_give(&blocker_release);
     wait_for_events(2U);
     assert_event(0U, "ACT10", 1U, 0U);
     assert_event(1U, "ACT11", 1U, 0U);
