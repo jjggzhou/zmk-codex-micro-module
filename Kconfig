@@ -1,2 +1,27 @@
 config CODEX_MICRO
     bool "Codex Micro support"
+
+if CODEX_MICRO
+
+config ZMK_KEYBOARD_NAME
+    string
+    default "Codex Micro"
+
+config USB_DEVICE_VID
+    default 0x303A
+
+config USB_DEVICE_PID
+    default 0x8360
+
+config USB_DEVICE_MANUFACTURER
+    default "Work Louder"
+
+config USB_DEVICE_PRODUCT
+    default "Codex Micro"
+
+config USB_HID_DEVICE_COUNT
+    int
+    default 1
+    range 1 1
+
+endif

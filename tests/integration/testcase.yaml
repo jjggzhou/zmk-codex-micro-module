@@ -1,0 +1,7 @@
+tests:
+  codex.usb_integration:
+    platform_allow:
+      - native_posix_64
+    tags:
+      - codex_micro
+      - usb
