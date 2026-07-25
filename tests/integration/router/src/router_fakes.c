@@ -30,6 +30,9 @@ static char clear_log[32];
 static size_t clear_log_len;
 static uint32_t ble_generation;
 static size_t ble_purge_count;
+static size_t ble_abort_count;
+static size_t ble_fail_after;
+static int ble_fail_error;
 static bool usb_powered;
 static uint8_t status_profile;
 static uint8_t status_layer;
@@ -61,6 +64,9 @@ void router_fakes_reset(void)
     clear_log_len = 0U;
     ble_generation = 0U;
     ble_purge_count = 0U;
+    ble_abort_count = 0U;
+    ble_fail_after = SIZE_MAX;
+    ble_fail_error = 0;
     usb_powered = false;
     status_profile = 0U;
     status_layer = 0U;
@@ -91,6 +97,9 @@ int codex_ble_vendor_notify(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
     if (send_error != 0) {
         return send_error;
     }
+    if (ble_count >= ble_fail_after) {
+        return ble_fail_error;
+    }
     if (ble_count == MAX_PACKETS) {
         return -ENOSPC;
     }
@@ -102,6 +111,12 @@ void codex_ble_hids_purge_queues(void)
 {
     ble_generation++;
     ble_purge_count++;
+}
+
+void codex_ble_hids_abort_current_response(void)
+{
+    ble_abort_count++;
+    codex_ble_hids_purge_queues();
 }
 
 uint32_t codex_ble_hids_generation(void) { return ble_generation; }
@@ -159,6 +174,12 @@ enum zmk_usb_conn_state zmk_usb_get_conn_state(void)
 
 bool zmk_usb_is_hid_ready(void) { return false; }
 
+int __real_usb_enable(usb_dc_status_callback status_cb)
+{
+    ARG_UNUSED(status_cb);
+    return 0;
+}
+
 int zmk_ble_active_profile_index(void) { return status_profile; }
 bool zmk_ble_active_profile_is_connected(void) { return true; }
 uint8_t zmk_keymap_highest_layer_active(void) { return status_layer; }
@@ -177,6 +198,11 @@ as_zmk_usb_conn_state_changed(const zmk_event_t *event)
 
 void router_fake_set_usb_powered(bool powered) { usb_powered = powered; }
 void router_fake_set_send_error(int error) { send_error = error; }
+void router_fake_fail_ble_after(size_t successful_packets, int error)
+{
+    ble_fail_after = successful_packets;
+    ble_fail_error = error;
+}
 void router_fake_block_first_usb_send(bool block) { block_first_usb_send = block; }
 int router_fake_wait_usb_send_entered(k_timeout_t timeout)
 {
@@ -196,6 +222,7 @@ enum codex_transport router_fake_mouse_release_transport(void)
 }
 uint32_t router_fake_ble_generation(void) { return ble_generation; }
 size_t router_fake_ble_purge_count(void) { return ble_purge_count; }
+size_t router_fake_ble_abort_count(void) { return ble_abort_count; }
 
 void router_fake_set_status(uint8_t profile, uint8_t layer, uint8_t battery)
 {

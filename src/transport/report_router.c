@@ -30,10 +30,13 @@ struct pinned_route {
     uint32_t route_generation;
     uint8_t ble_profile;
     uint32_t ble_hids_generation;
+    uint16_t emitted_reports;
 };
 
 K_MUTEX_DEFINE(router_lock);
-K_MSGQ_DEFINE(ingress_msgq, sizeof(struct ingress_item),
+K_MSGQ_DEFINE(usb_ingress_msgq, sizeof(struct ingress_item),
+              CODEX_ROUTER_INGRESS_DEPTH, 4);
+K_MSGQ_DEFINE(ble_ingress_msgq, sizeof(struct ingress_item),
               CODEX_ROUTER_INGRESS_DEPTH, 4);
 
 static struct codex_route_state route_state;
@@ -51,7 +54,8 @@ static void invalidate_transport_locked(enum codex_transport transport)
 {
     ++*generation_for(transport);
     codex_framing_reset_transport(transport);
-    k_msgq_purge(&ingress_msgq);
+    k_msgq_purge(transport == CODEX_TRANSPORT_USB ? &usb_ingress_msgq
+                                                  : &ble_ingress_msgq);
 }
 
 static void select_standard_endpoint_locked(enum codex_transport next)
@@ -127,6 +131,17 @@ void codex_router_on_usb_state(enum zmk_usb_conn_state state)
     k_mutex_unlock(&router_lock);
 }
 
+void codex_router_on_usb_physical_state(enum usb_dc_status_code status)
+{
+    if (status != USB_DC_DISCONNECTED && status != USB_DC_RESET &&
+        status != USB_DC_CONFIGURED) {
+        return;
+    }
+    k_mutex_lock(&router_lock, K_FOREVER);
+    invalidate_transport_locked(CODEX_TRANSPORT_USB);
+    k_mutex_unlock(&router_lock);
+}
+
 void codex_router_on_ble_profile(uint8_t profile, bool connected)
 {
     bool changed;
@@ -144,6 +159,16 @@ void codex_router_on_ble_profile(uint8_t profile, bool connected)
     if (changed || purge_ble) {
         codex_ble_hids_purge_queues();
     }
+    k_mutex_unlock(&router_lock);
+}
+
+void codex_router_on_ble_connection_edge(uint8_t profile, bool connected)
+{
+    k_mutex_lock(&router_lock, K_FOREVER);
+    route_state.ble_profile = profile;
+    route_state.ble_connected = connected;
+    invalidate_transport_locked(CODEX_TRANSPORT_BLE);
+    (void)update_route_locked(false, true);
     k_mutex_unlock(&router_lock);
 }
 
@@ -193,7 +218,7 @@ static int capture_route_locked(struct pinned_route *pin)
 static int emit_pinned(
     const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE], void *context)
 {
-    const struct pinned_route *pin = context;
+    struct pinned_route *pin = context;
     int err;
 
     if (!pin_is_current_locked(pin)) {
@@ -204,11 +229,17 @@ static int emit_pinned(
               : codex_ble_vendor_notify(payload);
     if (err != 0) {
         diagnostics.emit_errors++;
+        if (pin->source == CODEX_TRANSPORT_BLE && pin->emitted_reports > 0U) {
+            diagnostics.aborted_responses++;
+            codex_ble_hids_abort_current_response();
+        }
+    } else {
+        pin->emitted_reports++;
     }
     return err;
 }
 
-static int send_json_pinned_locked(const struct pinned_route *pin,
+static int send_json_pinned_locked(struct pinned_route *pin,
                                    enum codex_channel channel,
                                    const uint8_t *json, size_t len)
 {
@@ -256,7 +287,7 @@ int codex_router_send_json(enum codex_channel channel, const uint8_t *json,
 static int rpc_response_emit(enum codex_transport source, const uint8_t *json,
                              size_t len, void *context)
 {
-    const struct pinned_route *pin = context;
+    struct pinned_route *pin = context;
 
     if (source != pin->source) {
         return -ESTALE;
@@ -324,7 +355,11 @@ static int process_item(const struct ingress_item *item)
 static int process_one(void)
 {
     struct ingress_item item;
-    int err = k_msgq_get(&ingress_msgq, &item, K_NO_WAIT);
+    int err = k_msgq_get(&usb_ingress_msgq, &item, K_NO_WAIT);
+
+    if (err != 0) {
+        err = k_msgq_get(&ble_ingress_msgq, &item, K_NO_WAIT);
+    }
 
     return err == 0 ? process_item(&item) : err;
 }
@@ -339,7 +374,10 @@ K_WORK_DEFINE(ingress_work, ingress_work_handler);
 
 static int enqueue_locked(const struct ingress_item *item)
 {
-    int err = k_msgq_put(&ingress_msgq, item, K_NO_WAIT);
+    struct k_msgq *queue = item->source == CODEX_TRANSPORT_USB
+                               ? &usb_ingress_msgq
+                               : &ble_ingress_msgq;
+    int err = k_msgq_put(queue, item, K_NO_WAIT);
 
     if (err != 0) {
         diagnostics.ingress_full++;
@@ -411,17 +449,35 @@ int codex_router_ingest_ble(
     return err;
 }
 
-void codex_usb_vendor_payload_received(
+int codex_usb_vendor_payload_received(
     const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
 {
-    (void)codex_router_ingest_usb(payload);
+    return codex_router_ingest_usb(payload);
 }
 
-void codex_ble_vendor_output_received_with_token(
+int codex_ble_vendor_output_received_with_token(
     const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],
     const struct codex_ble_source_token *token)
 {
-    (void)codex_router_ingest_ble(payload, token);
+    return codex_router_ingest_ble(payload, token);
+}
+
+static usb_dc_status_callback zmk_usb_status_callback;
+extern int __real_usb_enable(usb_dc_status_callback status_cb);
+
+static void codex_usb_status_callback(enum usb_dc_status_code status,
+                                      const uint8_t *params)
+{
+    codex_router_on_usb_physical_state(status);
+    if (zmk_usb_status_callback != NULL) {
+        zmk_usb_status_callback(status, params);
+    }
+}
+
+int __wrap_usb_enable(usb_dc_status_callback status_cb)
+{
+    zmk_usb_status_callback = status_cb;
+    return __real_usb_enable(codex_usb_status_callback);
 }
 
 struct codex_router_diagnostics codex_router_diagnostics_snapshot(void)
@@ -472,7 +528,8 @@ void codex_router_test_reset(void)
     memset(&diagnostics, 0, sizeof(diagnostics));
     atomic_clear(&ingress_busy);
     callback_result = 0;
-    k_msgq_purge(&ingress_msgq);
+    k_msgq_purge(&usb_ingress_msgq);
+    k_msgq_purge(&ble_ingress_msgq);
     codex_framing_reset_transport(CODEX_TRANSPORT_USB);
     codex_framing_reset_transport(CODEX_TRANSPORT_BLE);
     k_mutex_unlock(&router_lock);

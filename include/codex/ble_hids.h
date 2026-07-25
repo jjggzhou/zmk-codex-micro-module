@@ -20,14 +20,15 @@ struct codex_ble_source_token {
 };
 
 /* Task 7 connects these worker-context seams to the endpoint router. */
-void codex_ble_vendor_output_received(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
-void codex_ble_vendor_output_received_with_token(
+int codex_ble_vendor_output_received(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
+int codex_ble_vendor_output_received_with_token(
     const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],
     const struct codex_ble_source_token *token);
 void codex_ble_hids_purge_queues(void);
 uint32_t codex_ble_hids_generation(void);
 bool codex_ble_hids_token_is_current(const struct codex_ble_source_token *token,
                                      uint8_t active_profile);
+void codex_ble_hids_abort_current_response(void);
 
 /* Stable Feature report state used by the encrypted GATT read/write callbacks. */
 int codex_ble_vendor_feature_get(uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);

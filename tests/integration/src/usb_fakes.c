@@ -20,6 +20,7 @@ static size_t write_attempt_count;
 static bool write_in_flight;
 static uint8_t received_payload[CODEX_VENDOR_PAYLOAD_SIZE];
 static size_t received_count;
+static int vendor_ingress_error;
 static size_t bad_report_count;
 static size_t upstream_set_report_count;
 static size_t upstream_in_ready_count;
@@ -146,6 +147,7 @@ void codex_test_usb_fakes_reset(void)
     write_in_flight = false;
     memset(received_payload, 0, sizeof(received_payload));
     received_count = 0U;
+    vendor_ingress_error = 0;
     bad_report_count = 0U;
     upstream_set_report_count = 0U;
     upstream_in_ready_count = 0U;
@@ -211,10 +213,11 @@ int usb_wakeup_request(void)
     return 0;
 }
 
-void codex_usb_vendor_payload_received(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
+int codex_usb_vendor_payload_received(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
 {
     memcpy(received_payload, payload, sizeof(received_payload));
     received_count++;
+    return vendor_ingress_error;
 }
 
 void codex_usb_bad_report_received(uint8_t report_id, size_t len)
@@ -259,6 +262,7 @@ void codex_test_set_usb_status(enum usb_dc_status_code status) { usb_status = st
 size_t codex_test_wakeup_count(void) { return wakeup_count; }
 
 size_t codex_test_received_count(void) { return received_count; }
+void codex_test_set_vendor_ingress_error(int error) { vendor_ingress_error = error; }
 
 const uint8_t *codex_test_received_payload(void) { return received_payload; }
 

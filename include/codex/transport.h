@@ -29,10 +29,13 @@ struct codex_router_diagnostics {
     uint32_t framing_errors;
     uint32_t rpc_errors;
     uint32_t emit_errors;
+    uint32_t aborted_responses;
 };
 
 void codex_router_on_usb_state(enum zmk_usb_conn_state state);
+void codex_router_on_usb_physical_state(enum usb_dc_status_code status);
 void codex_router_on_ble_profile(uint8_t profile, bool connected);
+void codex_router_on_ble_connection_edge(uint8_t profile, bool connected);
 struct codex_route_state codex_router_state(void);
 
 int codex_router_ingest_usb(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);

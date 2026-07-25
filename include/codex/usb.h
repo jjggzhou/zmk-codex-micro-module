@@ -18,12 +18,12 @@ const char *codex_usb_product(void);
 const uint8_t *codex_usb_registered_report_descriptor(void);
 int codex_usb_transport_init(void);
 int codex_usb_send_vendor(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
-void codex_usb_output_received(uint8_t report_id, const uint8_t *data, size_t len);
+int codex_usb_output_received(uint8_t report_id, const uint8_t *data, size_t len);
 
 /*
  * Narrow Task 4 integration seam. A later transport queue provides strong
  * definitions; the Task 3 weak defaults deliberately do no parsing.
  */
-void codex_usb_vendor_payload_received(
+int codex_usb_vendor_payload_received(
     const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
 void codex_usb_bad_report_received(uint8_t report_id, size_t len);

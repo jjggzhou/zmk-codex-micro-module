@@ -33,14 +33,15 @@ static void fake_unref(void *connection)
     fake->references--;
 }
 
-/* This is the same strong Task-7 seam reached by the production output worker. */
-void codex_ble_vendor_output_received_with_token(
+/* This is the same strong Task-7 seam reached directly by the GATT write callback. */
+int codex_ble_vendor_output_received_with_token(
     const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],
     const struct codex_ble_source_token *token)
 {
     output_count++;
     memcpy(last_output, payload, sizeof(last_output));
     last_token = *token;
+    return 0;
 }
 
 static void strong_output_emit(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],

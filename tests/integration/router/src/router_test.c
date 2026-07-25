@@ -21,6 +21,49 @@ static void make_fragment(uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],
 
 static void process_ok(void) { zassert_ok(codex_router_test_process_one()); }
 
+struct request_ingest_context {
+    enum codex_transport transport;
+    struct codex_ble_source_token token;
+};
+
+static int ingest_request_fragment(
+    const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE], void *context)
+{
+    struct request_ingest_context *ingest = context;
+    int err = ingest->transport == CODEX_TRANSPORT_USB
+                  ? codex_router_ingest_usb(payload)
+                  : codex_router_ingest_ble(payload, &ingest->token);
+
+    if (err == 0) {
+        err = codex_router_test_process_one();
+    }
+    return err;
+}
+
+static void send_long_ble_request(bool standard)
+{
+    uint8_t request[420];
+    size_t prefix_len;
+    size_t suffix_len;
+    struct request_ingest_context context = {
+        .transport = CODEX_TRANSPORT_BLE,
+        .token = {1U, router_fake_ble_generation()},
+    };
+    const char *prefix = standard
+        ? "{\"jsonrpc\":\"2.0\",\"method\":\"sys.version\",\"params\":null,\"id\":\""
+        : "{\"m\":\"sys.version\",\"p\":null,\"id\":\"";
+    const char *suffix = "\"}";
+
+    prefix_len = strlen(prefix);
+    suffix_len = strlen(suffix);
+    memcpy(request, prefix, prefix_len);
+    memset(&request[prefix_len], 'x', 300U);
+    memcpy(&request[prefix_len + 300U], suffix, suffix_len);
+    zassert_ok(codex_framing_encode(CODEX_CHANNEL_RPC, request,
+                                    prefix_len + 300U + suffix_len,
+                                    ingest_request_fragment, &context));
+}
+
 static void collect_response(enum codex_transport transport, char *json,
                              size_t capacity)
 {
@@ -128,6 +171,20 @@ ZTEST(router, test_full_compact_rpc_chain_over_ble)
                "\"id\":5");
 }
 
+ZTEST(router, test_compact_ble_response_can_exceed_four_reports)
+{
+    codex_router_on_ble_profile(1U, true);
+    send_long_ble_request(false);
+    zassert_true(router_fake_ble_count() > 4U);
+}
+
+ZTEST(router, test_standard_ble_response_can_exceed_four_reports)
+{
+    codex_router_on_ble_profile(1U, true);
+    send_long_ble_request(true);
+    zassert_true(router_fake_ble_count() > 4U);
+}
+
 ZTEST(router, test_debug_channel_never_enters_rpc)
 {
     uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE];
@@ -172,6 +229,95 @@ ZTEST(router, test_profile_and_usb_generation_changes_purge_stale_ingress)
     zassert_ok(codex_router_ingest_usb(payload));
     codex_router_on_usb_state(ZMK_USB_CONN_NONE);
     zassert_equal(codex_router_test_process_one(), -ENOMSG);
+}
+
+ZTEST(router, test_ble_change_does_not_purge_current_usb_ingress)
+{
+    uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE];
+
+    codex_router_on_ble_profile(0U, true);
+    codex_router_on_usb_state(ZMK_USB_CONN_HID);
+    make_fragment(payload, CODEX_CHANNEL_RPC,
+                  "{\"m\":\"sys.version\",\"p\":null,\"id\":8}");
+    zassert_ok(codex_router_ingest_usb(payload));
+    codex_router_on_ble_profile(1U, true);
+    process_ok();
+    zassert_true(router_fake_usb_count() > 0U);
+}
+
+ZTEST(router, test_usb_edge_does_not_purge_current_ble_ingress)
+{
+    uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE];
+    struct codex_ble_source_token token;
+
+    codex_router_on_ble_profile(1U, true);
+    make_fragment(payload, CODEX_CHANNEL_RPC,
+                  "{\"m\":\"sys.version\",\"p\":null,\"id\":9}");
+    token = (struct codex_ble_source_token){1U, router_fake_ble_generation()};
+    zassert_ok(codex_router_ingest_ble(payload, &token));
+    codex_router_on_usb_physical_state(USB_DC_RESET);
+    process_ok();
+    zassert_true(router_fake_ble_count() > 0U);
+}
+
+ZTEST(router, test_usb_physical_reenumeration_discards_old_partial)
+{
+    uint8_t first[CODEX_VENDOR_PAYLOAD_SIZE];
+    uint8_t second[CODEX_VENDOR_PAYLOAD_SIZE];
+
+    codex_router_on_usb_state(ZMK_USB_CONN_HID);
+    make_fragment(first, CODEX_CHANNEL_RPC, "{\"m\":\"sys.");
+    zassert_ok(codex_router_ingest_usb(first));
+    process_ok();
+    codex_router_on_usb_physical_state(USB_DC_DISCONNECTED);
+    codex_router_on_usb_physical_state(USB_DC_CONFIGURED);
+    make_fragment(second, CODEX_CHANNEL_RPC,
+                  "version\",\"p\":null,\"id\":1}");
+    zassert_ok(codex_router_ingest_usb(second));
+    zassert_true(codex_router_test_process_one() < 0);
+    zassert_equal(router_fake_usb_count(), 0U);
+}
+
+ZTEST(router, test_same_profile_disconnect_reconnect_rejects_old_token_and_partial)
+{
+    uint8_t first[CODEX_VENDOR_PAYLOAD_SIZE];
+    uint8_t second[CODEX_VENDOR_PAYLOAD_SIZE];
+    struct codex_ble_source_token old;
+    struct codex_ble_source_token fresh;
+
+    codex_router_on_ble_profile(1U, true);
+    old = (struct codex_ble_source_token){1U, router_fake_ble_generation()};
+    make_fragment(first, CODEX_CHANNEL_RPC, "{\"m\":\"sys.");
+    zassert_ok(codex_router_ingest_ble(first, &old));
+    process_ok();
+    codex_ble_hids_purge_queues();
+    codex_router_on_ble_connection_edge(1U, false);
+    codex_ble_hids_purge_queues();
+    codex_router_on_ble_connection_edge(1U, true);
+    zassert_equal(codex_router_ingest_ble(first, &old), -ESTALE);
+    fresh = (struct codex_ble_source_token){1U, router_fake_ble_generation()};
+    make_fragment(second, CODEX_CHANNEL_RPC,
+                  "version\",\"p\":null,\"id\":1}");
+    zassert_ok(codex_router_ingest_ble(second, &fresh));
+    zassert_true(codex_router_test_process_one() < 0);
+    zassert_equal(router_fake_ble_count(), 0U);
+}
+
+ZTEST(router, test_mid_response_ble_failure_aborts_connection_generation)
+{
+    static const uint8_t json[] =
+        "{\"result\":{\"text\":\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\"},\"id\":10}";
+    uint32_t generation;
+
+    codex_router_on_ble_profile(1U, true);
+    generation = router_fake_ble_generation();
+    router_fake_fail_ble_after(2U, -EIO);
+    zassert_equal(codex_router_send_json(CODEX_CHANNEL_RPC, json,
+                                        sizeof(json) - 1U), -EIO);
+    zassert_equal(router_fake_ble_count(), 2U);
+    zassert_equal(router_fake_ble_abort_count(), 1U);
+    zassert_true(router_fake_ble_generation() != generation);
+    zassert_equal(codex_router_diagnostics_snapshot().aborted_responses, 1U);
 }
 
 ZTEST(router, test_old_ble_token_is_rejected)

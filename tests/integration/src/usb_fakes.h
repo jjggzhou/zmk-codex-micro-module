@@ -26,6 +26,7 @@ void codex_test_set_usb_status(enum usb_dc_status_code status);
 size_t codex_test_wakeup_count(void);
 
 size_t codex_test_received_count(void);
+void codex_test_set_vendor_ingress_error(int error);
 const uint8_t *codex_test_received_payload(void);
 size_t codex_test_bad_report_count(void);
 size_t codex_test_upstream_set_report_count(void);

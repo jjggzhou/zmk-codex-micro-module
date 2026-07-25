@@ -64,10 +64,11 @@ extern void __real_usb_hid_register_device(const struct device *dev, const uint8
 extern int __real_hid_int_ep_write(const struct device *dev, const uint8_t *data,
                                    uint32_t data_len, uint32_t *bytes_ret);
 
-__weak void
+__weak int
 codex_usb_vendor_payload_received(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
 {
     (void)payload;
+    return 0;
 }
 
 __weak void codex_usb_bad_report_received(uint8_t report_id, size_t len)
@@ -76,15 +77,15 @@ __weak void codex_usb_bad_report_received(uint8_t report_id, size_t len)
     (void)len;
 }
 
-void codex_usb_output_received(uint8_t report_id, const uint8_t *data, size_t len)
+int codex_usb_output_received(uint8_t report_id, const uint8_t *data, size_t len)
 {
     if (report_id == CODEX_VENDOR_REPORT_ID && data != NULL &&
         len == CODEX_VENDOR_PAYLOAD_SIZE) {
-        codex_usb_vendor_payload_received(data);
-        return;
+        return codex_usb_vendor_payload_received(data);
     }
 
     codex_usb_bad_report_received(report_id, len);
+    return -EINVAL;
 }
 
 static int codex_set_report(const struct device *dev, struct usb_setup_packet *setup,
@@ -95,12 +96,10 @@ static int codex_set_report(const struct device *dev, struct usb_setup_packet *s
 
     if (report_type == HID_REPORT_TYPE_OUTPUT && report_id == CODEX_VENDOR_REPORT_ID) {
         if (*len == CODEX_INTERNAL_REPORT_SIZE && (*data)[0] == CODEX_VENDOR_REPORT_ID) {
-            codex_usb_output_received(report_id, &(*data)[1], CODEX_VENDOR_PAYLOAD_SIZE);
-            return 0;
+            return codex_usb_output_received(report_id, &(*data)[1], CODEX_VENDOR_PAYLOAD_SIZE);
         }
         if (*len == CODEX_VENDOR_PAYLOAD_SIZE) {
-            codex_usb_output_received(report_id, *data, CODEX_VENDOR_PAYLOAD_SIZE);
-            return 0;
+            return codex_usb_output_received(report_id, *data, CODEX_VENDOR_PAYLOAD_SIZE);
         }
 
         codex_usb_output_received(report_id, *data, (size_t)*len);

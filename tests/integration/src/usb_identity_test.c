@@ -354,6 +354,23 @@ ZTEST(usb_identity, test_vendor_output_is_normalized_before_delivery)
     zassert_equal(codex_test_bad_report_count(), 0U);
 }
 
+ZTEST(usb_identity, test_vendor_ingress_error_reaches_control_set_report)
+{
+    uint8_t wire_report[CODEX_INTERNAL_REPORT_SIZE] = {
+        [0] = CODEX_VENDOR_REPORT_ID,
+    };
+    struct usb_setup_packet setup = {
+        .wValue = HID_REPORT_TYPE_OUTPUT | CODEX_VENDOR_REPORT_ID,
+    };
+    int32_t len = sizeof(wire_report);
+    uint8_t *data = wire_report;
+
+    codex_test_set_vendor_ingress_error(-ENOSPC);
+    zassert_equal(codex_test_registered_ops()->set_report(
+                      fake_hid_device, &setup, &len, &data), -ENOSPC);
+    zassert_equal(codex_test_received_count(), 1U);
+}
+
 ZTEST(usb_identity, test_invalid_vendor_output_is_rejected)
 {
     uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE] = {0U};

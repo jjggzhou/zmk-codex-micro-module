@@ -39,6 +39,15 @@ def main() -> None:
     assert "<__wrap_zmk_usb_hid_send_mouse_report>" in mouse_sender
     assert "<__wrap_hid_int_ep_write>" in mouse_wrapper
 
+    usb_init = function_body("zmk_usb_init")
+    usb_wrapper = function_body("__wrap_usb_enable")
+    usb_status_callback = function_body("codex_usb_status_callback")
+    ble_notify = function_body("codex_ble_vendor_notify")
+    assert "<__wrap_usb_enable>" in usb_init
+    assert "<usb_enable>" in usb_wrapper
+    assert "<codex_router_on_usb_physical_state>" in usb_status_callback
+    assert "<bt_gatt_notify_cb>" in ble_notify
+
     config = (build / "zephyr" / ".config").read_text().splitlines()
     wanted = {
         "CONFIG_BT_L2CAP_TX_MTU=69",
@@ -55,6 +64,8 @@ def main() -> None:
         elf = ELFFile(stream)
         symtab = elf.get_section_by_name(".symtab")
         symbols = {sym.name: sym for sym in symtab.iter_symbols() if sym.name}
+        assert "vendor_notify_msgq" not in symbols
+        assert "vendor_notify_work" not in symbols
 
         def data_at(address: int, size: int) -> bytes:
             for segment in elf.iter_segments():
@@ -121,6 +132,7 @@ def main() -> None:
 
     print("offline ELF probe: one HIDS, 32 attrs, exact refs/CCC/encryption, auto MTU exchange")
     print("USB mouse endpoint calls the ABI converter, which calls the shared serialized HID writer")
+    print("USB enable is wrapped for physical edges; BLE notify calls GATT directly with no notify work queue")
     print("physical live GATT round-trip is intentionally deferred to Task 16")
 
 

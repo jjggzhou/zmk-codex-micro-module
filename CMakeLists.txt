@@ -22,6 +22,9 @@ target_sources_ifdef(CONFIG_CODEX_REPORT_ROUTER codex_micro PRIVATE
 if(CONFIG_CODEX_REPORT_ROUTER AND CONFIG_ZMK_POINTING)
   zephyr_ld_options(-Wl,--wrap=zmk_hid_mouse_clear)
 endif()
+if(CONFIG_CODEX_REPORT_ROUTER AND CONFIG_ZMK_USB)
+  zephyr_ld_options(-Wl,--wrap=usb_enable)
+endif()
 
 if(CONFIG_CODEX_MICRO)
   zephyr_ld_options(
