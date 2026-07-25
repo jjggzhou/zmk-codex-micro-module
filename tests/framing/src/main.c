@@ -603,6 +603,131 @@ ZTEST(framing, test_1024_byte_json_accepts_split_crlf_without_buffer_overflow)
     zassert_true(codex_framing_test_canaries_intact());
 }
 
+static void assert_late_terminator_is_discarded(const uint8_t *json, size_t len,
+                                                const uint8_t *terminator,
+                                                size_t terminator_len, bool split)
+{
+    captured_count = 0U;
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      json, len));
+    zassert_equal(captured_count, 1U);
+    zassert_mem_equal(captured[0].data, json, len);
+
+    if (split) {
+        zassert_equal(terminator_len, 2U);
+        zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                          terminator, 1U));
+        zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                          &terminator[1], 1U));
+    } else {
+        zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                          terminator, terminator_len));
+    }
+    zassert_equal(captured_count, 1U);
+    zassert_ok(ingest_json(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                           (const uint8_t *)"{}", 2U));
+    zassert_equal(captured_count, 2U);
+    zassert_equal(captured[1].len, 2U);
+    zassert_mem_equal(captured[1].data, "{}", 2U);
+}
+
+ZTEST(framing, test_late_terminators_after_exact_61_values_do_not_pollute_next_json)
+{
+    uint8_t object[CODEX_FRAGMENT_MAX];
+    uint8_t string[CODEX_FRAGMENT_MAX];
+    static const uint8_t lf[] = {'\n'};
+    static const uint8_t crlf[] = {'\r', '\n'};
+
+    memcpy(object, "{\"x\":\"", 6U);
+    memset(&object[6], 'o', 53U);
+    object[59] = '"';
+    object[60] = '}';
+    string[0] = '"';
+    memset(&string[1], 's', sizeof(string) - 2U);
+    string[sizeof(string) - 1U] = '"';
+
+    assert_late_terminator_is_discarded(object, sizeof(object), lf, sizeof(lf), false);
+    assert_late_terminator_is_discarded(object, sizeof(object), crlf, sizeof(crlf), false);
+    assert_late_terminator_is_discarded(object, sizeof(object), crlf, sizeof(crlf), true);
+    assert_late_terminator_is_discarded(string, sizeof(string), lf, sizeof(lf), false);
+    assert_late_terminator_is_discarded(string, sizeof(string), crlf, sizeof(crlf), false);
+    assert_late_terminator_is_discarded(string, sizeof(string), crlf, sizeof(crlf), true);
+}
+
+ZTEST(framing, test_orphan_terminators_are_safely_discarded)
+{
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"\n", 1U));
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"\r\n", 2U));
+    zassert_equal(captured_count, 0U);
+    zassert_ok(ingest_json(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                           (const uint8_t *)"{}", 2U));
+    zassert_equal(captured_count, 1U);
+    zassert_mem_equal(captured[0].data, "{}", 2U);
+}
+
+ZTEST(framing, test_discard_only_cr_requires_exactly_one_lf_and_is_channel_local)
+{
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_DEBUG, test_generation,
+                      (const uint8_t *)"[1,", 3U));
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"\r", 1U));
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_DEBUG, test_generation,
+                      (const uint8_t *)"2]", 2U));
+    zassert_equal(captured_count, 1U);
+    zassert_equal(captured[0].channel, CODEX_CHANNEL_DEBUG);
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"\n", 1U));
+    zassert_equal(captured_count, 1U);
+
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"\r", 1U));
+    zassert_true(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                        NULL, 0U) < 0);
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"\r", 1U));
+    zassert_true(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                        (const uint8_t *)"x", 1U) < 0);
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"\r", 1U));
+    zassert_true(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                        (const uint8_t *)"\n\n", 2U) < 0);
+
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"\r", 1U));
+    zassert_ok(ingest_json(CODEX_TRANSPORT_USB, CODEX_CHANNEL_DEBUG,
+                           test_generation + 1U, (const uint8_t *)"[]", 2U));
+    zassert_equal(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                         (const uint8_t *)"\n", 1U), -ESTALE);
+    zassert_ok(ingest_json(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC,
+                           test_generation + 1U, (const uint8_t *)"{}", 2U));
+}
+
+ZTEST(framing, test_late_terminator_does_not_reduce_next_1024_byte_capacity)
+{
+    uint8_t exact[CODEX_FRAGMENT_MAX];
+    uint8_t maximum[TEST_JSON_MAX];
+
+    exact[0] = '"';
+    memset(&exact[1], 'e', sizeof(exact) - 2U);
+    exact[sizeof(exact) - 1U] = '"';
+    maximum[0] = '"';
+    memset(&maximum[1], 'm', sizeof(maximum) - 2U);
+    maximum[sizeof(maximum) - 1U] = '"';
+
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      exact, sizeof(exact)));
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"\r\n", 2U));
+    captured_count = 0U;
+    zassert_ok(ingest_json(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                           maximum, sizeof(maximum)));
+    zassert_equal(captured_count, 1U);
+    zassert_equal(captured[0].len, sizeof(maximum));
+    zassert_mem_equal(captured[0].data, maximum, sizeof(maximum));
+}
+
 ZTEST(framing, test_encode_rejects_inputs_and_stops_at_first_emit_error)
 {
     uint8_t long_json[100] = {'"'};

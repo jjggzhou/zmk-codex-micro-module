@@ -16,6 +16,7 @@ struct channel_state {
     size_t len;
     bool number_waiting_delimiter;
     bool pending_protocol_cr;
+    bool pending_cr_has_delivery;
     size_t pending_delivery_len;
 };
 
@@ -43,6 +44,7 @@ static void reset_channel(struct channel_state *state)
     state->len = 0U;
     state->number_waiting_delimiter = false;
     state->pending_protocol_cr = false;
+    state->pending_cr_has_delivery = false;
     state->pending_delivery_len = 0U;
 }
 
@@ -180,6 +182,7 @@ static int handle_complete_value(struct channel_state *state,
     if (trailing.kind == TRAILING_PENDING_CR) {
         state->len = trailing.delivery_len;
         state->pending_protocol_cr = true;
+        state->pending_cr_has_delivery = true;
         state->pending_delivery_len = trailing.delivery_len;
         return 0;
     }
@@ -241,13 +244,33 @@ int codex_framing_ingest(enum codex_transport transport,
 
     if (channel_state->pending_protocol_cr) {
         size_t delivery_len = channel_state->pending_delivery_len;
+        bool has_delivery = channel_state->pending_cr_has_delivery;
 
         if (fragment_len == 1U && payload[2] == '\n') {
-            return emit_and_reset(channel_state, transport, channel, delivery_len,
-                                  on_json);
+            if (has_delivery) {
+                return emit_and_reset(channel_state, transport, channel, delivery_len,
+                                      on_json);
+            }
+            reset_channel(channel_state);
+            return 0;
         }
         reset_channel(channel_state);
         return -EINVAL;
+    }
+
+    if (channel_state->len == 0U && !channel_state->number_waiting_delimiter) {
+        if (fragment_len == 1U && payload[2] == '\n') {
+            return 0;
+        }
+        if (fragment_len == 2U && payload[2] == '\r' && payload[3] == '\n') {
+            return 0;
+        }
+        if (fragment_len == 1U && payload[2] == '\r') {
+            channel_state->pending_protocol_cr = true;
+            channel_state->pending_cr_has_delivery = false;
+            channel_state->pending_delivery_len = 0U;
+            return 0;
+        }
     }
 
     if (fragment_len == 0U) {
@@ -291,6 +314,7 @@ int codex_framing_ingest(enum codex_transport transport,
         if (trailing.kind == TRAILING_JSON_WHITESPACE) {
             if (leftover == 1U && overflow[0] == '\r') {
                 channel_state->pending_protocol_cr = true;
+                channel_state->pending_cr_has_delivery = true;
                 channel_state->pending_delivery_len = trailing.delivery_len;
                 return 0;
             }
