@@ -1,0 +1,6 @@
+tests:
+  codex.framing:
+    platform_allow: native_posix_64
+    tags:
+      - codex
+      - framing
