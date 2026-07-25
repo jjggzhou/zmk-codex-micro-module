@@ -189,6 +189,12 @@ int codex_usb_send_vendor(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
     return hid_int_ep_write(codex_hid_device, wire_report, sizeof(wire_report), NULL);
 }
 
+void codex_usb_transport_reset_writer(void)
+{
+    k_sem_reset(&codex_hid_in_sem);
+    k_sem_give(&codex_hid_in_sem);
+}
+
 #if IS_ENABLED(CONFIG_ZMK_POINTING)
 static int8_t codex_mouse_axis_to_usb(int16_t value)
 {

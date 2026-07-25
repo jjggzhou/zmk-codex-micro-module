@@ -43,10 +43,24 @@ def main() -> None:
     usb_wrapper = function_body("__wrap_usb_enable")
     usb_status_callback = function_body("codex_usb_status_callback")
     ble_notify = function_body("codex_ble_vendor_notify")
+    ble_capture = function_body("codex_ble_hids_capture_active")
+    ble_abort = function_body("codex_ble_hids_abort_response")
+    usb_recovery = function_body("usb_recovery_work_handler")
     assert "<__wrap_usb_enable>" in usb_init
     assert "<usb_enable>" in usb_wrapper
     assert "<codex_router_on_usb_physical_state>" in usb_status_callback
+    assert "<zmk_ble_active_profile_conn>" in ble_capture
+    assert "<codex_ble_hids_connection_is_current>" in ble_notify
     assert "<bt_gatt_notify_cb>" in ble_notify
+    assert "<zmk_ble_active_profile_conn>" not in ble_notify
+    assert "<codex_ble_hids_connection_is_current>" in ble_abort
+    assert "<bt_conn_disconnect>" in ble_abort
+    assert "<zmk_ble_active_profile_conn>" not in ble_abort
+    assert "<usb_disable>" in usb_recovery
+    assert "<codex_usb_transport_reset_writer>" in usb_recovery
+    assert "<usb_enable>" in usb_recovery
+    assert "<k_work_reschedule>" in usb_recovery
+    assert "<k_sleep>" not in usb_recovery
 
     config = (build / "zephyr" / ".config").read_text().splitlines()
     wanted = {
@@ -133,6 +147,7 @@ def main() -> None:
     print("offline ELF probe: one HIDS, 32 attrs, exact refs/CCC/encryption, auto MTU exchange")
     print("USB mouse endpoint calls the ABI converter, which calls the shared serialized HID writer")
     print("USB enable is wrapped for physical edges; BLE notify calls GATT directly with no notify work queue")
+    print("BLE notify/abort target the pinned ref; USB recovery is delayed detach/re-enable without sleeping")
     print("physical live GATT round-trip is intentionally deferred to Task 16")
 
 

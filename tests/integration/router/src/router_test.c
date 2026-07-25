@@ -40,6 +40,45 @@ static int ingest_request_fragment(
     return err;
 }
 
+static int enqueue_usb_fragment(
+    const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE], void *context)
+{
+    ARG_UNUSED(context);
+    return codex_router_ingest_usb(payload);
+}
+
+static bool usb_session_has_crlf(size_t session)
+{
+    uint8_t previous = 0U;
+
+    for (size_t i = 0U; i < router_fake_usb_count(); i++) {
+        const uint8_t *packet;
+        size_t fragment_len;
+
+        if (router_fake_usb_packet_session(i) != session) {
+            continue;
+        }
+        packet = router_fake_usb_packet(i);
+        fragment_len = packet[1];
+        for (size_t j = 0U; j < fragment_len; j++) {
+            uint8_t current = packet[2U + j];
+            if (previous == '\r' && current == '\n') {
+                return true;
+            }
+            previous = current;
+        }
+    }
+    return false;
+}
+
+static int send_multifragment_usb_response(void)
+{
+    static const uint8_t json[] =
+        "{\"result\":{\"text\":\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\"},\"id\":15}";
+
+    return codex_router_send_json(CODEX_CHANNEL_RPC, json, sizeof(json) - 1U);
+}
+
 static void send_long_ble_request(bool standard)
 {
     uint8_t request[420];
@@ -309,6 +348,7 @@ ZTEST(router, test_mid_response_ble_failure_aborts_connection_generation)
         "{\"result\":{\"text\":\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\"},\"id\":10}";
     uint32_t generation;
 
+    router_fake_set_status(1U, 0U, 80U);
     codex_router_on_ble_profile(1U, true);
     generation = router_fake_ble_generation();
     router_fake_fail_ble_after(2U, -EIO);
@@ -318,6 +358,110 @@ ZTEST(router, test_mid_response_ble_failure_aborts_connection_generation)
     zassert_equal(router_fake_ble_abort_count(), 1U);
     zassert_true(router_fake_ble_generation() != generation);
     zassert_equal(codex_router_diagnostics_snapshot().aborted_responses, 1U);
+    zassert_equal(router_fake_ble_references(0U), 0U);
+}
+
+ZTEST(router, test_same_profile_new_connection_never_receives_old_pinned_response)
+{
+    static const uint8_t json[] =
+        "{\"result\":{\"text\":\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\"},\"id\":12}";
+
+    router_fake_set_status(1U, 0U, 80U);
+    codex_router_on_ble_profile(1U, true);
+    router_fake_switch_ble_connection_on_notify(1U);
+    zassert_equal(codex_router_send_json(CODEX_CHANNEL_RPC, json,
+                                        sizeof(json) - 1U), -ESTALE);
+    zassert_equal(router_fake_ble_notify_count(1U), 0U,
+                  "a new same-profile connection must receive no old fragment");
+    zassert_true(router_fake_ble_peak_references(0U) > 0U,
+                 "the pinned old connection must be held by reference");
+    zassert_equal(router_fake_ble_references(0U), 0U);
+    zassert_equal(router_fake_ble_references(1U), 0U);
+}
+
+ZTEST(router, test_stale_old_response_abort_never_disconnects_new_connection)
+{
+    static const uint8_t json[] =
+        "{\"result\":{\"text\":\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\"},\"id\":13}";
+
+    router_fake_set_status(1U, 0U, 80U);
+    codex_router_on_ble_profile(1U, true);
+    router_fake_switch_ble_connection_on_notify(2U);
+    router_fake_fail_ble_after(1U, -ESTALE);
+    zassert_equal(codex_router_send_json(CODEX_CHANNEL_RPC, json,
+                                        sizeof(json) - 1U), -ESTALE);
+    zassert_equal(router_fake_ble_notify_count(0U), 1U);
+    zassert_equal(router_fake_ble_notify_count(1U), 0U);
+    zassert_equal(router_fake_ble_disconnect_count(1U), 0U,
+                  "abort must never look up and disconnect the new active connection");
+    zassert_equal(router_fake_ble_references(0U), 0U);
+    zassert_equal(router_fake_ble_references(1U), 0U);
+}
+
+ZTEST(router, test_worker_reenumerates_after_partial_usb_response_before_next_json)
+{
+    static const uint8_t request[] =
+        "{\"m\":\"sys.version\",\"p\":null,\"id\":\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\"}";
+    uint8_t next[CODEX_VENDOR_PAYLOAD_SIZE];
+
+    codex_router_on_usb_state(ZMK_USB_CONN_HID);
+    router_fake_fail_usb_after(1U, -EIO);
+    zassert_ok(codex_framing_encode(CODEX_CHANNEL_RPC, request,
+                                    sizeof(request) - 1U,
+                                    enqueue_usb_fragment, NULL));
+    codex_router_test_submit_work();
+    zassert_ok(router_fake_wait_usb_attempts(2U, K_MSEC(100)));
+    k_sleep(K_MSEC(20));
+    zassert_equal(router_fake_usb_disable_count(), 1U,
+                  "partial response requires a host-visible USB detach boundary");
+    zassert_false(usb_session_has_crlf(0U),
+                  "the pre-reset session contains only an incomplete prefix");
+
+    router_fake_clear_usb_failure();
+    codex_router_on_usb_state(ZMK_USB_CONN_HID);
+    make_fragment(next, CODEX_CHANNEL_RPC,
+                  "{\"m\":\"sys.version\",\"p\":null,\"id\":14}");
+    zassert_ok(codex_router_ingest_usb(next));
+    codex_router_test_submit_work();
+    zassert_ok(router_fake_wait_usb_attempts(3U, K_MSEC(100)));
+    k_sleep(K_MSEC(5));
+    zassert_true(usb_session_has_crlf(1U),
+                 "only a complete response may appear after re-enumeration");
+}
+
+ZTEST(router, test_usb_recovery_rejects_ingress_across_physical_edges_and_retries_enable)
+{
+    uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE];
+
+    codex_router_on_usb_state(ZMK_USB_CONN_HID);
+    router_fake_fail_usb_after(1U, -EIO);
+    router_fake_fail_usb_enable(1U, -EIO);
+    zassert_equal(send_multifragment_usb_response(), -EIO);
+    zassert_ok(router_fake_wait_usb_disables(1U, K_MSEC(100)));
+    make_fragment(payload, CODEX_CHANNEL_DEBUG, "{}");
+    codex_router_on_usb_physical_state(USB_DC_RESET);
+    codex_router_on_usb_state(ZMK_USB_CONN_HID);
+    zassert_equal(codex_router_ingest_usb(payload), -EAGAIN,
+                  "USB ingress must fail explicitly until recovery completes");
+    zassert_ok(router_fake_wait_usb_enables(1U, K_MSEC(100)));
+    zassert_equal(codex_router_ingest_usb(payload), -EAGAIN,
+                  "failed re-enable must keep the recovery gate closed");
+    zassert_ok(router_fake_wait_usb_enables(2U, K_MSEC(250)));
+    zassert_equal(codex_router_diagnostics_snapshot().usb_recovery_errors, 1U);
+}
+
+ZTEST(router, test_two_consecutive_partial_usb_responses_each_reenumerate)
+{
+    codex_router_on_usb_state(ZMK_USB_CONN_HID);
+    router_fake_fail_usb_after(1U, -EIO);
+    zassert_equal(send_multifragment_usb_response(), -EIO);
+    zassert_ok(router_fake_wait_usb_enables(1U, K_MSEC(100)));
+
+    codex_router_on_usb_state(ZMK_USB_CONN_HID);
+    zassert_equal(send_multifragment_usb_response(), -EIO);
+    zassert_ok(router_fake_wait_usb_enables(2U, K_MSEC(100)));
+    zassert_equal(router_fake_usb_disable_count(), 2U);
+    zassert_equal(codex_router_diagnostics_snapshot().usb_recoveries, 2U);
 }
 
 ZTEST(router, test_old_ble_token_is_rejected)

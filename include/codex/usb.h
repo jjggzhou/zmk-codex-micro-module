@@ -18,6 +18,7 @@ const char *codex_usb_product(void);
 const uint8_t *codex_usb_registered_report_descriptor(void);
 int codex_usb_transport_init(void);
 int codex_usb_send_vendor(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
+void codex_usb_transport_reset_writer(void);
 int codex_usb_output_received(uint8_t report_id, const uint8_t *data, size_t len);
 
 /*

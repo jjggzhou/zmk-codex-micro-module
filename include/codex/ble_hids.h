@@ -12,12 +12,21 @@ enum codex_ble_report_type {
     CODEX_BLE_REPORT_FEATURE = 0x03,
 };
 
-int codex_ble_vendor_notify(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
+struct bt_conn;
 
 struct codex_ble_source_token {
     uint8_t profile_index;
     uint32_t connection_generation;
 };
+
+int codex_ble_hids_capture_active(struct bt_conn **connection,
+                                  struct codex_ble_source_token *token);
+void codex_ble_hids_release_connection(struct bt_conn *connection);
+bool codex_ble_hids_connection_is_current(
+    struct bt_conn *connection, const struct codex_ble_source_token *token);
+int codex_ble_vendor_notify(
+    struct bt_conn *connection, const struct codex_ble_source_token *token,
+    const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
 
 /* Task 7 connects these worker-context seams to the endpoint router. */
 int codex_ble_vendor_output_received(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
@@ -28,7 +37,8 @@ void codex_ble_hids_purge_queues(void);
 uint32_t codex_ble_hids_generation(void);
 bool codex_ble_hids_token_is_current(const struct codex_ble_source_token *token,
                                      uint8_t active_profile);
-void codex_ble_hids_abort_current_response(void);
+int codex_ble_hids_abort_response(
+    struct bt_conn *connection, const struct codex_ble_source_token *token);
 
 /* Stable Feature report state used by the encrypted GATT read/write callbacks. */
 int codex_ble_vendor_feature_get(uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);

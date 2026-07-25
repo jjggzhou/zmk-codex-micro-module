@@ -281,50 +281,91 @@ static ssize_t write_codex_output(struct bt_conn *conn, const struct bt_gatt_att
 #define CODEX_VENDOR_INPUT_DECL_ATTR_INDEX 22U
 BUILD_ASSERT(ARRAY_SIZE(attr_hog_svc) == 32U, "pinned HIDS attribute layout changed");
 
-int codex_ble_vendor_notify(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
+int codex_ble_hids_capture_active(struct bt_conn **connection,
+                                  struct codex_ble_source_token *token)
 {
-    int err;
     struct bt_conn *conn;
-    struct codex_ble_owned_item item;
-    struct bt_gatt_notify_params params = {
-        .attr = &hog_svc.attrs[CODEX_VENDOR_INPUT_DECL_ATTR_INDEX],
-        .len = CODEX_VENDOR_PAYLOAD_SIZE,
-    };
+    int profile;
 
-    if (payload == NULL) {
+    if (connection == NULL || token == NULL) {
         return -EINVAL;
     }
     conn = zmk_ble_active_profile_conn();
     if (conn == NULL) {
         return -ENOTCONN;
     }
+    profile = zmk_ble_profile_index(bt_conn_get_dst(conn));
+    if (profile < 0 || profile > UINT8_MAX) {
+        bt_conn_unref(conn);
+        return -ENOTCONN;
+    }
+    *connection = conn;
+    *token = (struct codex_ble_source_token){
+        .profile_index = (uint8_t)profile,
+        .connection_generation = codex_ble_hids_generation(),
+    };
+    return 0;
+}
+
+void codex_ble_hids_release_connection(struct bt_conn *connection)
+{
+    if (connection != NULL) {
+        bt_conn_unref(connection);
+    }
+}
+
+bool codex_ble_hids_connection_is_current(
+    struct bt_conn *connection, const struct codex_ble_source_token *token)
+{
+    struct bt_conn *active;
+    int active_profile;
+    bool current;
+
+    if (connection == NULL || token == NULL ||
+        token->connection_generation != codex_ble_hids_generation()) {
+        return false;
+    }
+    active = zmk_ble_active_profile_conn();
+    if (active == NULL) {
+        return false;
+    }
+    active_profile = zmk_ble_profile_index(bt_conn_get_dst(active));
+    current = active == connection && active_profile == token->profile_index;
+    bt_conn_unref(active);
+    return current;
+}
+
+int codex_ble_vendor_notify(
+    struct bt_conn *connection, const struct codex_ble_source_token *token,
+    const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
+{
+    int err;
+    struct bt_gatt_notify_params params = {
+        .attr = &hog_svc.attrs[CODEX_VENDOR_INPUT_DECL_ATTR_INDEX],
+        .data = payload,
+        .len = CODEX_VENDOR_PAYLOAD_SIZE,
+    };
+
+    if (connection == NULL || token == NULL || payload == NULL) {
+        return -EINVAL;
+    }
     err = codex_ble_vendor_notify_preflight(
         true,
-        bt_gatt_is_subscribed(conn, &hog_svc.attrs[CODEX_VENDOR_INPUT_DECL_ATTR_INDEX],
-                              BT_GATT_CCC_NOTIFY),
-        bt_gatt_get_mtu(conn), payload);
-    if (err == 0) {
-        err = queue_item_capture(&item, conn, payload);
-    }
+        bt_gatt_is_subscribed(connection, params.attr, BT_GATT_CCC_NOTIFY),
+        bt_gatt_get_mtu(connection), payload);
     if (err != 0) {
-        bt_conn_unref(conn);
         return err;
     }
-    params.data = item.payload;
-    if (!queue_item_is_current(&item, params.attr, true)) {
-        queue_item_release(&item);
-        bt_conn_unref(conn);
+    if (!codex_ble_hids_connection_is_current(connection, token)) {
         return -ESTALE;
     }
     k_mutex_lock(&vendor_input_lock, K_FOREVER);
-    memcpy(vendor_input_state, item.payload, sizeof(vendor_input_state));
+    memcpy(vendor_input_state, payload, sizeof(vendor_input_state));
     k_mutex_unlock(&vendor_input_lock);
-    err = bt_gatt_notify_cb(item.connection, &params);
+    err = bt_gatt_notify_cb(connection, &params);
     if (err == -EPERM) {
-        bt_conn_set_security(item.connection, BT_SECURITY_L2);
+        bt_conn_set_security(connection, BT_SECURITY_L2);
     }
-    queue_item_release(&item);
-    bt_conn_unref(conn);
     return err;
 }
 
@@ -345,15 +386,13 @@ bool codex_ble_hids_token_is_current(const struct codex_ble_source_token *token,
            token->connection_generation == codex_ble_hids_generation();
 }
 
-void codex_ble_hids_abort_current_response(void)
+int codex_ble_hids_abort_response(
+    struct bt_conn *connection, const struct codex_ble_source_token *token)
 {
-    struct bt_conn *conn = zmk_ble_active_profile_conn();
-
-    codex_ble_hids_purge_queues();
-    if (conn != NULL) {
-        (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-        bt_conn_unref(conn);
+    if (!codex_ble_hids_connection_is_current(connection, token)) {
+        return -ESTALE;
     }
+    return bt_conn_disconnect(connection, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 }
 
 static void codex_ble_connection_edge(struct bt_conn *conn, bool connected)

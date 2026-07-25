@@ -30,6 +30,8 @@ struct codex_router_diagnostics {
     uint32_t rpc_errors;
     uint32_t emit_errors;
     uint32_t aborted_responses;
+    uint32_t usb_recoveries;
+    uint32_t usb_recovery_errors;
 };
 
 void codex_router_on_usb_state(enum zmk_usb_conn_state state);
@@ -50,6 +52,7 @@ struct codex_router_diagnostics codex_router_diagnostics_snapshot(void);
 #if defined(CONFIG_ZTEST)
 void codex_router_test_reset(void);
 int codex_router_test_process_one(void);
+void codex_router_test_submit_work(void);
 void codex_router_test_set_generations(uint32_t usb_generation,
                                        uint32_t ble_generation);
 #endif
