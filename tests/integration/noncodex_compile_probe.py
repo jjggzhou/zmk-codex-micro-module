@@ -22,6 +22,8 @@ def main() -> None:
         "/src/transport/ble_report_state.c",
         "/src/transport/ble_hids.c",
         "/src/transport/report_router.c",
+        "/src/input/codex_keys.c",
+        "/src/input/encoder.c",
     )
     found = sorted(source for source in sources if source.endswith(forbidden_suffixes))
     assert not found, f"Codex BLE production sources leaked into non-Codex build: {found}"

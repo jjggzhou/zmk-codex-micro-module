@@ -13,6 +13,13 @@ config CODEX_REPORT_ROUTER
       Owns Vendor Report ingress, JSON-RPC dispatch, and automatic USB-priority
       output selection. Ztests enable this explicitly when testing the router.
 
+config CODEX_INPUT_EVENT_QUEUE_DEPTH
+    int "Codex input event queue depth"
+    default 16
+    range 1 32
+    help
+      Number of validated key and encoder edges owned by the input worker.
+
 config CODEX_FIRMWARE_VERSION
     string "Codex compatibility firmware version"
     default "0.4.1"
