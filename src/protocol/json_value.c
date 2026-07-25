@@ -369,27 +369,48 @@ static enum codex_json_result parse_value(struct parser *parser, size_t depth)
     }
 }
 
-enum codex_json_result codex_json_value_validate(const uint8_t *data, size_t len,
-                                                 size_t maximum_depth)
+struct codex_json_scan codex_json_value_scan(const uint8_t *data, size_t len,
+                                             size_t maximum_depth)
 {
     struct parser parser = {
         .data = data,
         .len = len,
         .maximum_depth = maximum_depth,
     };
+    struct codex_json_scan scan = {
+        .result = CODEX_JSON_INVALID,
+        .root_kind = CODEX_JSON_ROOT_OTHER,
+        .value_end = 0U,
+    };
     enum codex_json_result result;
 
     if (data == NULL || len == 0U || maximum_depth == 0U) {
-        return len == 0U ? CODEX_JSON_INCOMPLETE : CODEX_JSON_INVALID;
+        scan.result = len == 0U ? CODEX_JSON_INCOMPLETE : CODEX_JSON_INVALID;
+        return scan;
     }
     result = validate_utf8(data, len);
     if (result != CODEX_JSON_COMPLETE) {
-        return result;
+        scan.result = result;
+        return scan;
+    }
+    skip_space(&parser);
+    if (parser.pos < parser.len &&
+        (parser.data[parser.pos] == '-' || is_digit(parser.data[parser.pos]))) {
+        scan.root_kind = CODEX_JSON_ROOT_NUMBER;
     }
     result = parse_value(&parser, 0U);
     if (result != CODEX_JSON_COMPLETE) {
-        return result;
+        scan.result = result;
+        return scan;
     }
+    scan.value_end = parser.pos;
     skip_space(&parser);
-    return parser.pos == parser.len ? CODEX_JSON_COMPLETE : CODEX_JSON_INVALID;
+    scan.result = parser.pos == parser.len ? CODEX_JSON_COMPLETE : CODEX_JSON_INVALID;
+    return scan;
+}
+
+enum codex_json_result codex_json_value_validate(const uint8_t *data, size_t len,
+                                                 size_t maximum_depth)
+{
+    return codex_json_value_scan(data, len, maximum_depth).result;
 }

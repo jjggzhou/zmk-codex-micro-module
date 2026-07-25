@@ -88,6 +88,21 @@ static int ingest_json(enum codex_transport transport, enum codex_channel channe
     return ingest(transport, channel, generation, &json[offset], len - offset);
 }
 
+static void round_trip_encoded(const uint8_t *json, size_t len)
+{
+    emitted_count = 0U;
+    captured_count = 0U;
+    zassert_ok(codex_framing_encode(CODEX_CHANNEL_RPC, json, len,
+                                    capture_report, NULL));
+    for (size_t i = 0U; i < emitted_count; i++) {
+        zassert_ok(codex_framing_ingest(CODEX_TRANSPORT_USB, emitted[i],
+                                        test_generation, capture_json));
+    }
+    zassert_equal(captured_count, 1U);
+    zassert_equal(captured[0].len, len);
+    zassert_mem_equal(captured[0].data, json, len);
+}
+
 static void reset_case(void)
 {
     uint8_t empty[CODEX_VENDOR_PAYLOAD_SIZE] = {CODEX_CHANNEL_RPC, 0U};
@@ -96,6 +111,9 @@ static void reset_case(void)
     emitted_count = 0U;
     fail_emit_at = SIZE_MAX;
     test_generation++;
+    (void)codex_framing_ingest(CODEX_TRANSPORT_USB, empty, test_generation, capture_json);
+    (void)codex_framing_ingest(CODEX_TRANSPORT_BLE, empty, test_generation, capture_json);
+    empty[0] = CODEX_CHANNEL_DEBUG;
     (void)codex_framing_ingest(CODEX_TRANSPORT_USB, empty, test_generation, capture_json);
     (void)codex_framing_ingest(CODEX_TRANSPORT_BLE, empty, test_generation, capture_json);
     captured_count = 0U;
@@ -360,6 +378,112 @@ ZTEST(framing, test_encode_exact_61_and_122_byte_json_round_trip)
         zassert_equal(captured[0].len, len);
         zassert_mem_equal(captured[0].data, json, len);
     }
+}
+
+ZTEST(framing, test_fragmented_top_level_numbers_wait_for_a_delimiter)
+{
+    uint8_t integer[122];
+    uint8_t decimal[100];
+    uint8_t exponent[100];
+
+    memset(integer, '7', sizeof(integer));
+    memset(decimal, '4', sizeof(decimal));
+    decimal[60] = '.';
+    memset(exponent, '5', sizeof(exponent));
+    exponent[60] = 'e';
+    exponent[61] = '+';
+
+    round_trip_encoded(integer, 100U);
+    round_trip_encoded(integer, sizeof(integer));
+    round_trip_encoded(decimal, sizeof(decimal));
+    round_trip_encoded(exponent, sizeof(exponent));
+
+    captured_count = 0U;
+    zassert_ok(ingest_json(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC,
+                           test_generation, integer, 100U));
+    zassert_equal(captured_count, 0U);
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      NULL, 0U));
+    zassert_equal(captured_count, 1U);
+    zassert_equal(captured[0].len, 100U);
+}
+
+ZTEST(framing, test_internal_json_line_breaks_at_fragment_boundary_are_preserved)
+{
+    static const uint8_t endings[][2] = {{'\n', 0U}, {'\r', 0U}, {'\r', '\n'}};
+    uint8_t json[80];
+
+    for (size_t case_index = 0U; case_index < ARRAY_SIZE(endings); case_index++) {
+        size_t ending_len = endings[case_index][1] == 0U ? 1U : 2U;
+        size_t prefix_len = CODEX_FRAGMENT_MAX - ending_len;
+        size_t len;
+
+        memcpy(json, "{\"a\":", 5U);
+        memset(&json[5], ' ', prefix_len - 5U);
+        memcpy(&json[prefix_len], endings[case_index], ending_len);
+        json[CODEX_FRAGMENT_MAX] = '1';
+        json[CODEX_FRAGMENT_MAX + 1U] = '}';
+        len = CODEX_FRAGMENT_MAX + 2U;
+
+        round_trip_encoded(json, len);
+    }
+}
+
+ZTEST(framing, test_stale_and_half_range_generations_are_rejected_without_state_change)
+{
+    uint32_t current = test_generation + 1U;
+    uint32_t stale = test_generation;
+    uint32_t half_range = current + UINT32_C(0x80000000);
+
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, current,
+                      (const uint8_t *)"{\"kept\":", 8U));
+    zassert_equal(ingest_json(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, stale,
+                              (const uint8_t *)"{\"stale\":1}", 11U), -ESTALE);
+    zassert_equal(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, stale,
+                         (const uint8_t *)"{\"multi\":", 9U), -ESTALE);
+    zassert_equal(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, stale,
+                         (const uint8_t *)"2}", 2U), -ESTALE);
+    zassert_equal(ingest_json(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, half_range,
+                              (const uint8_t *)"{}", 2U), -ESTALE);
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, current,
+                      (const uint8_t *)"true}", 5U));
+    zassert_equal(captured_count, 1U);
+    zassert_mem_equal(captured[0].data, "{\"kept\":true}", 13U);
+}
+
+ZTEST(framing, test_generation_wrap_from_uint32_max_to_zero_is_newer)
+{
+    uint32_t current = test_generation;
+    uint32_t remaining = UINT32_MAX - current;
+
+    while (remaining > 0U) {
+        uint32_t step = remaining > INT32_MAX ? INT32_MAX : remaining;
+
+        current += step;
+        zassert_ok(ingest(CODEX_TRANSPORT_BLE, CODEX_CHANNEL_RPC, current,
+                          (const uint8_t *)"{", 1U));
+        remaining -= step;
+    }
+    zassert_ok(ingest_json(CODEX_TRANSPORT_BLE, CODEX_CHANNEL_RPC, 0U,
+                           (const uint8_t *)"{\"wrapped\":true}", 16U));
+    zassert_equal(captured_count, 1U);
+}
+
+ZTEST(framing, test_invalid_channel_does_not_clear_known_channel_partials)
+{
+    uint8_t invalid[CODEX_VENDOR_PAYLOAD_SIZE] = {0x7FU, 2U, '{', '}'};
+
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"{\"r\":", 5U));
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_DEBUG, test_generation,
+                      (const uint8_t *)"[1,", 3U));
+    zassert_equal(codex_framing_ingest(CODEX_TRANSPORT_USB, invalid,
+                                       test_generation, capture_json), -EINVAL);
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_RPC, test_generation,
+                      (const uint8_t *)"2}", 2U));
+    zassert_ok(ingest(CODEX_TRANSPORT_USB, CODEX_CHANNEL_DEBUG, test_generation,
+                      (const uint8_t *)"3]", 2U));
+    zassert_equal(captured_count, 2U);
 }
 
 ZTEST(framing, test_encode_rejects_inputs_and_stops_at_first_emit_error)

@@ -9,7 +9,7 @@
 struct channel_state {
     uint8_t buffer[CODEX_JSON_MAX_SIZE];
     size_t len;
-    bool pending_cr;
+    bool number_waiting_delimiter;
 };
 
 struct transport_state {
@@ -31,12 +31,16 @@ static int channel_index(enum codex_channel channel)
     return -1;
 }
 
+static void reset_channel(struct channel_state *state)
+{
+    state->len = 0U;
+    state->number_waiting_delimiter = false;
+}
+
 static void reset_transport(struct transport_state *state)
 {
-    state->channels[0].len = 0U;
-    state->channels[0].pending_cr = false;
-    state->channels[1].len = 0U;
-    state->channels[1].pending_cr = false;
+    reset_channel(&state->channels[0]);
+    reset_channel(&state->channels[1]);
 }
 
 static bool padding_is_zero(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE], size_t len)
@@ -49,6 +53,76 @@ static bool padding_is_zero(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE], si
     return true;
 }
 
+static bool is_lf_or_crlf(const uint8_t *data, size_t len)
+{
+    return (len == 1U && data[0] == '\n') ||
+           (len == 2U && data[0] == '\r' && data[1] == '\n');
+}
+
+static int accept_generation(struct transport_state *state, uint32_t incoming)
+{
+    uint32_t difference;
+
+    if (!state->generation_valid) {
+        state->generation = incoming;
+        state->generation_valid = true;
+        return 0;
+    }
+
+    difference = incoming - state->generation;
+    if (difference == 0U) {
+        return 0;
+    }
+    if (difference == UINT32_C(0x80000000) || (int32_t)difference < 0) {
+        return -ESTALE;
+    }
+
+    reset_transport(state);
+    state->generation = incoming;
+    return 0;
+}
+
+static int emit_and_reset(struct channel_state *state, enum codex_transport transport,
+                          enum codex_channel channel, size_t value_len,
+                          codex_json_cb_t on_json)
+{
+    on_json(transport, channel, state->buffer, value_len);
+    reset_channel(state);
+    return 0;
+}
+
+static int handle_complete_value(struct channel_state *state,
+                                 enum codex_transport transport,
+                                 enum codex_channel channel,
+                                 const struct codex_json_scan *scan,
+                                 size_t fragment_len,
+                                 codex_json_cb_t on_json)
+{
+    const uint8_t *trailing = &state->buffer[scan->value_end];
+    size_t trailing_len = state->len - scan->value_end;
+
+    if (trailing_len > 0U) {
+        if (is_lf_or_crlf(trailing, trailing_len)) {
+            return emit_and_reset(state, transport, channel, scan->value_end, on_json);
+        }
+        if (trailing_len == 1U && trailing[0] == '\r') {
+            return 0;
+        }
+        reset_channel(state);
+        return -EINVAL;
+    }
+
+    if (scan->root_kind != CODEX_JSON_ROOT_NUMBER) {
+        return emit_and_reset(state, transport, channel, scan->value_end, on_json);
+    }
+    if (!state->number_waiting_delimiter && fragment_len < CODEX_FRAGMENT_MAX) {
+        return emit_and_reset(state, transport, channel, scan->value_end, on_json);
+    }
+
+    state->number_waiting_delimiter = true;
+    return 0;
+}
+
 int codex_framing_ingest(enum codex_transport transport,
                          const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],
                          uint32_t connection_generation,
@@ -56,91 +130,105 @@ int codex_framing_ingest(enum codex_transport transport,
 {
     struct transport_state *transport_state;
     struct channel_state *channel_state;
+    struct codex_json_scan scan;
     enum codex_channel channel;
-    enum codex_json_result result;
     size_t fragment_len;
-    size_t fragment_offset = 0U;
-    size_t append_len;
-    bool has_terminator = false;
+    size_t available;
+    size_t copied;
+    size_t leftover;
     int index;
+    int err;
 
     if ((unsigned int)transport >= CODEX_TRANSPORT_COUNT || payload == NULL ||
         on_json == NULL) {
         return -EINVAL;
     }
 
-    transport_state = &states[transport];
-    if (!transport_state->generation_valid ||
-        transport_state->generation != connection_generation) {
-        reset_transport(transport_state);
-        transport_state->generation = connection_generation;
-        transport_state->generation_valid = true;
-    }
-
     channel = (enum codex_channel)payload[0];
     index = channel_index(channel);
     if (index < 0) {
-        reset_transport(transport_state);
         return -EINVAL;
+    }
+
+    transport_state = &states[transport];
+    err = accept_generation(transport_state, connection_generation);
+    if (err != 0) {
+        return err;
     }
     channel_state = &transport_state->channels[index];
     fragment_len = payload[1];
     if (fragment_len > CODEX_FRAGMENT_MAX || !padding_is_zero(payload, fragment_len)) {
-        channel_state->len = 0U;
-        channel_state->pending_cr = false;
+        reset_channel(channel_state);
         return -EINVAL;
     }
 
-    append_len = fragment_len;
-    if (channel_state->pending_cr) {
-        if (append_len == 0U || payload[2] != '\n') {
-            channel_state->len = 0U;
-            channel_state->pending_cr = false;
-            return -EINVAL;
+    if (fragment_len == 0U) {
+        scan = codex_json_value_scan(channel_state->buffer, channel_state->len,
+                                     CODEX_JSON_MAX_DEPTH);
+        if (scan.result == CODEX_JSON_COMPLETE &&
+            scan.value_end == channel_state->len &&
+            scan.root_kind == CODEX_JSON_ROOT_NUMBER &&
+            channel_state->number_waiting_delimiter) {
+            return emit_and_reset(channel_state, transport, channel, scan.value_end,
+                                  on_json);
         }
-        channel_state->pending_cr = false;
-        has_terminator = true;
-        fragment_offset = 1U;
-        append_len--;
-        if (append_len != 0U) {
-            channel_state->len = 0U;
-            return -EINVAL;
-        }
-    } else if (append_len > 0U && payload[2U + append_len - 1U] == '\n') {
-        has_terminator = true;
-        append_len--;
-        if (append_len > 0U && payload[2U + append_len - 1U] == '\r') {
-            append_len--;
-        }
-    } else if (append_len > 0U && payload[2U + append_len - 1U] == '\r') {
-        channel_state->pending_cr = true;
-        append_len--;
-    }
-
-    if (append_len > CODEX_JSON_MAX_SIZE - channel_state->len) {
-        channel_state->len = 0U;
-        channel_state->pending_cr = false;
-        return -EMSGSIZE;
-    }
-
-    if (append_len > 0U) {
-        memcpy(&channel_state->buffer[channel_state->len],
-               &payload[2U + fragment_offset], append_len);
-        channel_state->len += append_len;
-    }
-    result = codex_json_value_validate(channel_state->buffer, channel_state->len,
-                                       CODEX_JSON_MAX_DEPTH);
-    if (result == CODEX_JSON_INVALID ||
-        (result == CODEX_JSON_INCOMPLETE && (fragment_len == 0U || has_terminator))) {
-        channel_state->len = 0U;
-        channel_state->pending_cr = false;
+        reset_channel(channel_state);
         return -EINVAL;
     }
-    if (result == CODEX_JSON_COMPLETE && !channel_state->pending_cr) {
-        on_json(transport, channel, channel_state->buffer, channel_state->len);
-        channel_state->len = 0U;
+
+    available = CODEX_JSON_MAX_SIZE - channel_state->len;
+    copied = fragment_len < available ? fragment_len : available;
+    if (copied > 0U) {
+        memcpy(&channel_state->buffer[channel_state->len], &payload[2], copied);
+        channel_state->len += copied;
     }
-    return 0;
+    leftover = fragment_len - copied;
+    scan = codex_json_value_scan(channel_state->buffer, channel_state->len,
+                                 CODEX_JSON_MAX_DEPTH);
+
+    if (leftover > 0U) {
+        const uint8_t *trailing_in_buffer;
+        size_t trailing_in_buffer_len;
+        uint8_t terminator[2];
+        size_t terminator_len = 0U;
+
+        if (scan.result != CODEX_JSON_COMPLETE) {
+            reset_channel(channel_state);
+            return -EMSGSIZE;
+        }
+        trailing_in_buffer = &channel_state->buffer[scan.value_end];
+        trailing_in_buffer_len = channel_state->len - scan.value_end;
+        if (trailing_in_buffer_len > sizeof(terminator) ||
+            leftover > sizeof(terminator) - trailing_in_buffer_len) {
+            reset_channel(channel_state);
+            return -EMSGSIZE;
+        }
+        memcpy(terminator, trailing_in_buffer, trailing_in_buffer_len);
+        terminator_len += trailing_in_buffer_len;
+        memcpy(&terminator[terminator_len], &payload[2U + copied], leftover);
+        terminator_len += leftover;
+        if (!is_lf_or_crlf(terminator, terminator_len)) {
+            reset_channel(channel_state);
+            return -EMSGSIZE;
+        }
+        return emit_and_reset(channel_state, transport, channel, scan.value_end,
+                              on_json);
+    }
+
+    if (scan.result == CODEX_JSON_INVALID) {
+        reset_channel(channel_state);
+        return -EINVAL;
+    }
+    if (scan.root_kind == CODEX_JSON_ROOT_NUMBER &&
+        scan.result == CODEX_JSON_INCOMPLETE) {
+        channel_state->number_waiting_delimiter = true;
+    }
+    if (scan.result == CODEX_JSON_INCOMPLETE) {
+        return 0;
+    }
+
+    return handle_complete_value(channel_state, transport, channel, &scan,
+                                 fragment_len, on_json);
 }
 
 int codex_framing_encode(enum codex_channel channel,
