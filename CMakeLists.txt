@@ -1,2 +1,3 @@
 zephyr_library_named(codex_micro)
 zephyr_include_directories(include)
+target_sources(codex_micro PRIVATE src/descriptors/usb_report_descriptor.c)
