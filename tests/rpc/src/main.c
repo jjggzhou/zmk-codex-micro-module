@@ -133,6 +133,10 @@ ZTEST(rpc, test_device_status_is_a_fresh_bounded_zmk_snapshot)
     zassert_true(response_has(&capture, "\"layer_index\":1"));
     zassert_true(response_has(&capture, "\"battery\":100"));
     zassert_true(response_has(&capture, "\"is_charging\":true"));
+
+    rpc_fake_status_set(256, 0, 100, false);
+    status = codex_device_status_snapshot();
+    zassert_equal(status.profile_index, 0U);
 }
 
 ZTEST(rpc, test_unknown_and_dangerous_methods_have_stable_errors)
