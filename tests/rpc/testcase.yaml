@@ -1,0 +1,6 @@
+tests:
+  codex.rpc:
+    platform_allow: native_posix_64
+    tags:
+      - codex
+      - rpc

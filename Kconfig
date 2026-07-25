@@ -4,6 +4,13 @@ config CODEX_MICRO
 
 if CODEX_MICRO
 
+config CODEX_FIRMWARE_VERSION
+    string "Codex compatibility firmware version"
+    default "0.4.1"
+    help
+      Compatibility target reported by sys.version and device.status. The
+      value is based on the original unit used for protocol verification.
+
 config ZMK_KEYBOARD_NAME
     string
     default "Codex Micro"

@@ -7,6 +7,8 @@ target_sources_ifdef(CONFIG_CODEX_MICRO codex_micro PRIVATE
   src/descriptors/usb_identity.c
   src/protocol/framing.c
   src/protocol/json_value.c
+  src/protocol/rpc.c
+  src/protocol/device_status.c
   src/transport/usb_transport.c
 )
 
