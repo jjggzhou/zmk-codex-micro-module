@@ -1,6 +1,8 @@
 config CODEX_MICRO
     bool "Codex Micro support"
     select ZMK_HID_INDICATORS
+    select ZMK_POINTING
+    select BT_GATT_AUTO_UPDATE_MTU
 
 if CODEX_MICRO
 
@@ -51,5 +53,17 @@ config ZMK_HID_CONSUMER_REPORT_SIZE
     int
     default 1
     range 1 1
+
+config BT_L2CAP_TX_MTU
+    default 69
+    range 69 69
+
+config BT_BUF_ACL_RX_SIZE
+    default 73
+    range 73 73
+
+config BT_BUF_ACL_TX_SIZE
+    default 73
+    range 73 73
 
 endif
