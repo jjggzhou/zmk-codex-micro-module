@@ -6,6 +6,13 @@ config CODEX_MICRO
 
 if CODEX_MICRO
 
+config CODEX_REPORT_ROUTER
+    bool "Codex USB-priority protocol router"
+    default y if !ZTEST
+    help
+      Owns Vendor Report ingress, JSON-RPC dispatch, and automatic USB-priority
+      output selection. Ztests enable this explicitly when testing the router.
+
 config CODEX_FIRMWARE_VERSION
     string "Codex compatibility firmware version"
     default "0.4.1"

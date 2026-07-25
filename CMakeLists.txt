@@ -15,6 +15,14 @@ target_sources_ifdef(CONFIG_CODEX_MICRO codex_micro PRIVATE
   src/transport/usb_transport.c
 )
 
+target_sources_ifdef(CONFIG_CODEX_REPORT_ROUTER codex_micro PRIVATE
+  src/transport/report_router.c
+)
+
+if(CONFIG_CODEX_REPORT_ROUTER AND CONFIG_ZMK_POINTING)
+  zephyr_ld_options(-Wl,--wrap=zmk_hid_mouse_clear)
+endif()
+
 if(CONFIG_CODEX_MICRO)
   zephyr_ld_options(
     -Wl,--wrap=usb_get_device_descriptor

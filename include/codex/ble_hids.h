@@ -25,6 +25,9 @@ void codex_ble_vendor_output_received_with_token(
     const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],
     const struct codex_ble_source_token *token);
 void codex_ble_hids_purge_queues(void);
+uint32_t codex_ble_hids_generation(void);
+bool codex_ble_hids_token_is_current(const struct codex_ble_source_token *token,
+                                     uint8_t active_profile);
 
 /* Stable Feature report state used by the encrypted GATT read/write callbacks. */
 int codex_ble_vendor_feature_get(uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);

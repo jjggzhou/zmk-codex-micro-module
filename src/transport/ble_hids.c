@@ -21,8 +21,6 @@
 #include <zephyr/sys/util.h>
 
 #include <zmk/ble.h>
-#include <zmk/event_manager.h>
-#include <zmk/events/ble_active_profile_changed.h>
 #include <zmk/hid.h>
 
 #include <codex/ble_hids.h>
@@ -381,35 +379,17 @@ void codex_ble_hids_purge_queues(void)
     }
 }
 
-static void codex_ble_connected(struct bt_conn *conn, uint8_t err)
+uint32_t codex_ble_hids_generation(void)
 {
-    ARG_UNUSED(conn);
-    if (err == 0U) {
-        codex_ble_hids_purge_queues();
-    }
+    return (uint32_t)atomic_get(&connection_generation);
 }
 
-static void codex_ble_disconnected(struct bt_conn *conn, uint8_t reason)
+bool codex_ble_hids_token_is_current(const struct codex_ble_source_token *token,
+                                     uint8_t active_profile)
 {
-    ARG_UNUSED(conn);
-    ARG_UNUSED(reason);
-    codex_ble_hids_purge_queues();
+    return token != NULL && token->profile_index == active_profile &&
+           token->connection_generation == codex_ble_hids_generation();
 }
-
-BT_CONN_CB_DEFINE(codex_ble_connection_callbacks) = {
-    .connected = codex_ble_connected,
-    .disconnected = codex_ble_disconnected,
-};
-
-static int codex_ble_profile_changed_listener(const zmk_event_t *event)
-{
-    ARG_UNUSED(event);
-    codex_ble_hids_purge_queues();
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
-ZMK_LISTENER(codex_ble_hids_profile_guard, codex_ble_profile_changed_listener);
-ZMK_SUBSCRIPTION(codex_ble_hids_profile_guard, zmk_ble_active_profile_changed);
 
 const struct codex_ble_gatt_contract codex_ble_gatt_contract[]
     __attribute__((used)) = {

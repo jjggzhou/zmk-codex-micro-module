@@ -35,3 +35,5 @@ int codex_framing_ingest(enum codex_transport transport,
 int codex_framing_encode(enum codex_channel channel,
                          const uint8_t *json, size_t len,
                          codex_emit_report_t emit, void *ctx);
+
+void codex_framing_reset_transport(enum codex_transport transport);

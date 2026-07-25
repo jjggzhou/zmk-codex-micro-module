@@ -28,6 +28,14 @@ struct transport_state {
 
 static struct transport_state states[CODEX_TRANSPORT_COUNT];
 
+void codex_framing_reset_transport(enum codex_transport transport)
+{
+    if ((unsigned int)transport >= CODEX_TRANSPORT_COUNT) {
+        return;
+    }
+    memset(&states[transport], 0, sizeof(states[transport]));
+}
+
 static int channel_index(enum codex_channel channel)
 {
     if (channel == CODEX_CHANNEL_DEBUG) {
