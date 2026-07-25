@@ -1,0 +1,57 @@
+description: |
+  Adapts synchronized relative X/Y input events from badjeff's
+  zmk,analog-input driver to Codex radial notifications. The input-device must
+  report INPUT_EV_REL/INPUT_REL_X and INPUT_EV_REL/INPUT_REL_Y. An event with
+  sync set ends one atomic sample: either axis may be omitted when unchanged,
+  so the adapter retains the other axis's latest raw value.
+
+compatible: "codex,analog-stick"
+
+properties:
+  input-device:
+    type: phandle
+    required: true
+    description: zmk,analog-input device that produces the paired X/Y events.
+  center-x:
+    type: int
+    required: true
+    description: Raw X reading at rest.
+  center-y:
+    type: int
+    required: true
+    description: Raw Y reading at rest.
+  max-x:
+    type: int
+    required: true
+    description: |
+      Positive full-scale raw X reading. It must be strictly greater than
+      center-x; the negative full-scale is treated as center-x - (max-x - center-x).
+  max-y:
+    type: int
+    required: true
+    description: |
+      Positive full-scale raw Y reading. It must be strictly greater than
+      center-y; the negative full-scale is treated as center-y - (max-y - center-y).
+  dead-zone:
+    type: int
+    default: 0
+    description: Raw counts around both axes' centers that normalize exactly to zero.
+  invert-x:
+    type: boolean
+    description: Reverse the normalized X axis.
+  invert-y:
+    type: boolean
+    description: Reverse the normalized Y axis.
+  meaningful-delta:
+    type: int
+    description: |
+      Minimum radial vector change for an immediate notification, expressed in
+      1/10000 of full scale (100 is 0.01). Values must be 0 through 10000;
+      omitted values use CONFIG_CODEX_ANALOG_MEANINGFUL_DELTA.
+  refresh-interval-ms:
+    type: int
+    description: |
+      Maximum time a non-center state may remain unreported. It is a positive
+      milliseconds interval (at most INT32_MAX) compared with wrap-safe
+      unsigned uptime arithmetic. Omitted values use
+      CONFIG_CODEX_ANALOG_REFRESH_INTERVAL_MS.

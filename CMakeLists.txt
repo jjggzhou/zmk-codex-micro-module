@@ -17,6 +17,10 @@ target_sources_ifdef(CONFIG_CODEX_MICRO codex_micro PRIVATE
   src/transport/usb_transport.c
 )
 
+target_sources_ifdef(CONFIG_CODEX_ANALOG_STICK codex_micro PRIVATE
+  src/input/analog_stick.c
+)
+
 target_sources_ifdef(CONFIG_CODEX_REPORT_ROUTER codex_micro PRIVATE
   src/transport/report_router.c
 )

@@ -1,0 +1,18 @@
+/ {
+    analog_test_source: analog-test-source {
+        status = "disabled";
+    };
+
+    codex_analog_test: codex-analog-test {
+        compatible = "codex,analog-stick";
+        status = "disabled";
+        input-device = <&analog_test_source>;
+        center-x = <2048>;
+        center-y = <2048>;
+        max-x = <4095>;
+        max-y = <4095>;
+        dead-zone = <100>;
+        meaningful-delta = <100>;
+        refresh-interval-ms = <20>;
+    };
+};

@@ -20,6 +20,42 @@ config CODEX_INPUT_EVENT_QUEUE_DEPTH
     help
       Number of validated key and encoder edges owned by the input worker.
 
+config CODEX_ANALOG_STICK
+    bool "Codex analog-stick input adapter"
+    default n
+    help
+      Converts synchronized relative X/Y events from zmk-analog-input-driver
+      into Codex radial notifications. It remains disabled until a board adds
+      a codex,analog-stick Devicetree node.
+
+if CODEX_ANALOG_STICK
+
+config CODEX_ANALOG_QUEUE_DEPTH
+    int "Codex analog sample queue depth"
+    default 8
+    range 1 32
+    help
+      Number of synchronized raw or radial samples that the input callback can
+      hand to the analog worker without allocating memory.
+
+config CODEX_ANALOG_MEANINGFUL_DELTA
+    int "Default analog meaningful delta (1/10000 full scale)"
+    default 100
+    range 0 10000
+    help
+      Used when a codex,analog-stick node omits meaningful-delta. 100 means a
+      radial vector movement of 0.01; zero emits every synchronized sample.
+
+config CODEX_ANALOG_REFRESH_INTERVAL_MS
+    int "Default analog refresh interval (ms)"
+    default 100
+    range 1 2147483647
+    help
+      Used when a codex,analog-stick node omits refresh-interval-ms. A held
+      non-center position is re-emitted after this wrap-safe uptime interval.
+
+endif
+
 config CODEX_FIRMWARE_VERSION
     string "Codex compatibility firmware version"
     default "0.4.1"

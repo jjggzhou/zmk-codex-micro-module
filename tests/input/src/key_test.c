@@ -10,6 +10,8 @@
 #include <codex/framing.h>
 #include <codex/input.h>
 
+#include "input_test_support.h"
+
 #define CAPTURE_MAX 48U
 
 static char sent[CAPTURE_MAX][80];
@@ -54,6 +56,11 @@ int codex_router_send_json(enum codex_channel channel, const uint8_t *json,
 static void reset_case(void *fixture)
 {
     ARG_UNUSED(fixture);
+    codex_input_test_reset_capture();
+}
+
+void codex_input_test_reset_capture(void)
+{
     memset(sent, 0, sizeof(sent));
     sent_count = 0U;
     router_result = 0;
@@ -67,7 +74,7 @@ static void reset_case(void *fixture)
     codex_input_test_reset();
 }
 
-static void wait_for_events(size_t count)
+void codex_input_test_wait_for_events(size_t count)
 {
     int64_t deadline = k_uptime_get() + 200;
 
@@ -76,6 +83,39 @@ static void wait_for_events(size_t count)
     }
     zassert_equal(sent_count, count);
 }
+
+const char *codex_input_test_event(size_t index)
+{
+    zassert_true(index < sent_count);
+    return sent[index];
+}
+
+size_t codex_input_test_event_count(void)
+{
+    return sent_count;
+}
+
+void codex_input_test_set_router_result(int result)
+{
+    router_result = result;
+}
+
+void codex_input_test_set_block_router(bool block)
+{
+    block_router = block;
+}
+
+int codex_input_test_wait_router_entered(void)
+{
+    return k_sem_take(&router_entered, K_MSEC(100));
+}
+
+void codex_input_test_release_router(void)
+{
+    k_sem_give(&router_release);
+}
+
+#define wait_for_events codex_input_test_wait_for_events
 
 static void assert_event(size_t index, const char *key, unsigned int action,
                          unsigned int agent)

@@ -15,4 +15,7 @@ target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
 target_include_directories(codex_micro PRIVATE ${ZMK_SOURCE_DIR}/app/include)
-target_sources(app PRIVATE src/key_test.c)
+target_sources(app PRIVATE
+  src/key_test.c
+  src/analog_test.c
+)

@@ -1,0 +1,45 @@
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+&adc {
+    status = "okay";
+};
+
+/ {
+    /* ADC channel numbers are a compile fixture only, never board pin wiring. */
+    analog_input_fixture: analog-input-fixture {
+        compatible = "zmk,analog-input";
+        sampling-hz = <0>;
+
+        x-channel {
+            io-channels = <&adc 2>;
+            mv-mid = <0>;
+            mv-min-max = <1000>;
+            mv-deadzone = <0>;
+            report-on-change-only;
+            evt-type = <INPUT_EV_REL>;
+            input-code = <INPUT_REL_X>;
+        };
+
+        y-channel {
+            io-channels = <&adc 3>;
+            mv-mid = <0>;
+            mv-min-max = <1000>;
+            mv-deadzone = <0>;
+            report-on-change-only;
+            evt-type = <INPUT_EV_REL>;
+            input-code = <INPUT_REL_Y>;
+        };
+    };
+
+    codex_analog_fixture: codex-analog-fixture {
+        compatible = "codex,analog-stick";
+        input-device = <&analog_input_fixture>;
+        center-x = <0>;
+        center-y = <0>;
+        max-x = <1000>;
+        max-y = <1000>;
+        dead-zone = <0>;
+        meaningful-delta = <100>;
+        refresh-interval-ms = <100>;
+    };
+};
