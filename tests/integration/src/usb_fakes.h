@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -16,10 +17,20 @@ const struct hid_ops *codex_test_registered_ops(void);
 
 const uint8_t *codex_test_last_write(void);
 size_t codex_test_last_write_size(void);
+size_t codex_test_write_attempt_count(void);
+bool codex_test_write_in_flight(void);
+void codex_test_complete_write(void);
 
 size_t codex_test_received_count(void);
 const uint8_t *codex_test_received_payload(void);
 size_t codex_test_bad_report_count(void);
 size_t codex_test_upstream_set_report_count(void);
+size_t codex_test_upstream_in_ready_count(void);
+uint8_t *codex_test_descriptor_block(void);
+size_t codex_test_descriptor_block_size(void);
+void codex_test_corrupt_endpoint_length(uint8_t length);
+uint16_t codex_test_descriptor_vid(void);
 const uint8_t *codex_test_manufacturer_utf16(void);
 const uint8_t *codex_test_product_utf16(void);
+const uint8_t *codex_test_serial_utf16(void);
+const uint8_t *codex_test_descriptor_canary(void);

@@ -1,5 +1,6 @@
 config CODEX_MICRO
     bool "Codex Micro support"
+    select ZMK_HID_INDICATORS
 
 if CODEX_MICRO
 
@@ -20,6 +21,26 @@ config USB_DEVICE_PRODUCT
     default "Codex Micro"
 
 config USB_HID_DEVICE_COUNT
+    int
+    default 1
+    range 1 1
+
+config HID_INTERRUPT_EP_MPS
+    int
+    default 64
+    range 64 64
+
+config USB_HID_REPORTS
+    int
+    default 6
+    range 6 6
+
+config ZMK_HID_KEYBOARD_REPORT_SIZE
+    int
+    default 6
+    range 6 6
+
+config ZMK_HID_CONSUMER_REPORT_SIZE
     int
     default 1
     range 1 1
