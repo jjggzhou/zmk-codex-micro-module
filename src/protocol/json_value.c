@@ -21,7 +21,7 @@ static void skip_space(struct parser *parser)
     }
 }
 
-static enum codex_json_result validate_utf8(const uint8_t *data, size_t len)
+enum codex_json_result codex_json_utf8_validate(const uint8_t *data, size_t len)
 {
     for (size_t i = 0U; i < len;) {
         uint8_t first = data[i++];
@@ -388,7 +388,7 @@ struct codex_json_scan codex_json_value_scan(const uint8_t *data, size_t len,
         scan.result = len == 0U ? CODEX_JSON_INCOMPLETE : CODEX_JSON_INVALID;
         return scan;
     }
-    result = validate_utf8(data, len);
+    result = codex_json_utf8_validate(data, len);
     if (result != CODEX_JSON_COMPLETE) {
         scan.result = result;
         return scan;

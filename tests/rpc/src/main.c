@@ -62,15 +62,19 @@ static bool response_has(const struct capture *capture, const char *needle)
 }
 
 static void expect_success(const char *request, const char *method,
-                           const char *result_fragment)
+                           const char *result_fragment, bool standard)
 {
     struct capture capture;
 
     zassert_ok(dispatch(request, &capture));
     zassert_equal(capture.count, 1U);
     zassert_equal(capture.source, CODEX_TRANSPORT_USB);
-    zassert_true(response_has(&capture, method));
+    if (!standard) {
+        zassert_true(response_has(&capture, method));
+    }
     zassert_true(response_has(&capture, result_fragment));
+    zassert_equal(response_has(&capture, "\"jsonrpc\":\"2.0\""), standard);
+    zassert_equal(response_has(&capture, "\"method\":"), !standard);
 }
 
 ZTEST(rpc, test_dispatches_both_request_shapes_and_all_supported_methods)
@@ -95,12 +99,12 @@ ZTEST(rpc, test_dispatches_both_request_shapes_and_all_supported_methods)
         snprintk(request, sizeof(request),
                  "{\"m\":\"%s\",\"p\":null,\"id\":%u}", cases[i].method,
                  (unsigned int)i + 1U);
-        expect_success(request, cases[i].method, cases[i].result);
+        expect_success(request, cases[i].method, cases[i].result, false);
         snprintk(request, sizeof(request),
                  "{\"jsonrpc\":\"2.0\",\"method\":\"%s\","
                  "\"params\":{},\"id\":\"s%u\"}", cases[i].method,
                  (unsigned int)i);
-        expect_success(request, cases[i].method, cases[i].result);
+        expect_success(request, cases[i].method, cases[i].result, true);
     }
 }
 
@@ -150,11 +154,24 @@ ZTEST(rpc, test_unknown_and_dangerous_methods_have_stable_errors)
 
     zassert_ok(dispatch("{\"m\":\"not.real\",\"id\":3}", &capture));
     zassert_true(response_has(&capture, "\"code\":404"));
+    zassert_false(response_has(&capture, "\"jsonrpc\":"));
+    zassert_ok(dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"not.real\","
+                        "\"id\":3}", &capture));
+    zassert_true(response_has(&capture, "\"code\":404"));
+    zassert_true(response_has(&capture, "\"jsonrpc\":\"2.0\""));
+    zassert_false(response_has(&capture, "\"method\":"));
     for (size_t i = 0U; i < ARRAY_SIZE(dangerous); i++) {
         snprintk(request, sizeof(request), "{\"m\":\"%s\",\"id\":4}",
                  dangerous[i]);
         zassert_ok(dispatch(request, &capture));
         zassert_true(response_has(&capture, "\"code\":403"));
+        snprintk(request, sizeof(request),
+                 "{\"jsonrpc\":\"2.0\",\"method\":\"%s\",\"id\":4}",
+                 dangerous[i]);
+        zassert_ok(dispatch(request, &capture));
+        zassert_true(response_has(&capture, "\"code\":403"));
+        zassert_true(response_has(&capture, "\"jsonrpc\":\"2.0\""));
+        zassert_false(response_has(&capture, "\"method\":"));
     }
 
     zassert_ok(dispatch("{\"m\":\"filesystem.list\",\"id\":5}", &capture));
@@ -168,6 +185,9 @@ ZTEST(rpc, test_notifications_do_not_emit)
     struct capture capture;
 
     zassert_ok(dispatch("{\"m\":\"sys.version\",\"p\":null}", &capture));
+    zassert_equal(capture.count, 0U);
+    zassert_ok(dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"sys.version\","
+                        "\"params\":null}", &capture));
     zassert_equal(capture.count, 0U);
 }
 
@@ -184,6 +204,25 @@ ZTEST(rpc, test_ids_are_type_checked_and_safely_echoed)
     zassert_false(response_has(&capture, "\"owned\":true,"));
     zassert_ok(dispatch("{\"m\":\"sys.version\",\"id\":null}", &capture));
     zassert_true(response_has(&capture, "\"id\":null"));
+    static const char *const number_ids[] = {"1e2", "1.5", "-0.25e+3"};
+
+    for (size_t i = 0U; i < ARRAY_SIZE(number_ids); i++) {
+        char request[96];
+
+        snprintk(request, sizeof(request), "{\"m\":\"sys.version\",\"id\":%s}",
+                 number_ids[i]);
+        zassert_ok(dispatch(request, &capture));
+        snprintk(request, sizeof(request), "\"id\":%s", number_ids[i]);
+        zassert_true(response_has(&capture, request));
+
+        snprintk(request, sizeof(request),
+                 "{\"jsonrpc\":\"2.0\",\"method\":\"sys.version\","
+                 "\"id\":%s}", number_ids[i]);
+        zassert_ok(dispatch(request, &capture));
+        snprintk(request, sizeof(request), "\"id\":%s", number_ids[i]);
+        zassert_true(response_has(&capture, request));
+        zassert_true(response_has(&capture, "\"jsonrpc\":\"2.0\""));
+    }
 
     zassert_equal(dispatch("{\"m\":\"sys.version\",\"id\":true}", &capture),
                   -EINVAL);
@@ -196,6 +235,11 @@ ZTEST(rpc, test_token_aware_parser_rejects_ambiguous_or_malformed_requests)
         "{\"m\":\"sys.version\",\"m\":\"device.status\",\"id\":1}",
         "{\"m\":\"sys.version\",\"\\u006d\":\"device.status\",\"id\":1}",
         "{\"method\":\"sys.version\",\"m\":\"sys.version\",\"id\":1}",
+        "{\"m\":\"sys.version\",\"jsonrpc\":\"2.0\",\"id\":1}",
+        "{\"m\":\"sys.version\",\"params\":null,\"id\":1}",
+        "{\"method\":\"sys.version\",\"p\":null,\"id\":1}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"sys.version\",\"p\":null,"
+        "\"id\":1}",
         "{\"m\":7,\"id\":1}",
         "{\"m\":\"sys.version\",\"p\":7,\"id\":1}",
         "{\"jsonrpc\":\"2.0\",\"method\":\"sys.version\","
@@ -224,6 +268,39 @@ ZTEST(rpc, test_token_aware_parser_rejects_ambiguous_or_malformed_requests)
 
     zassert_ok(dispatch("{\"m\":\"fs\\u002elist\",\"id\":11}", &capture));
     zassert_true(response_has(&capture, "\"code\":403"));
+}
+
+ZTEST(rpc, test_dynamic_json_strings_are_bounded_escaped_and_utf8_checked)
+{
+    static const char special[] = {'v', '"', '\\', '\b', '\f', '\n', '\r', '\t',
+                                   0x01, (char)0xE4, (char)0xB8, (char)0xAD, '\0'};
+    static const uint8_t want[] =
+        "\"v\\\"\\\\\\b\\f\\n\\r\\t\\u0001\xE4\xB8\xAD\"";
+    static const char invalid_utf8[] = {(char)0xC0, (char)0xAF, '\0'};
+    static const char unterminated[] = {'x', 'y'};
+    char too_long[CODEX_JSON_MAX_SIZE + 1U];
+    struct capture capture;
+
+    memset(&capture, 0, sizeof(capture));
+    zassert_ok(codex_rpc_test_emit_json_cstr(special, sizeof(special), capture_emit,
+                                             &capture));
+    zassert_equal(capture.count, 1U);
+    zassert_equal(capture.len, sizeof(want) - 1U);
+    zassert_mem_equal(capture.json, want, sizeof(want) - 1U);
+
+    memset(&capture, 0, sizeof(capture));
+    zassert_equal(codex_rpc_test_emit_json_cstr(invalid_utf8, sizeof(invalid_utf8),
+                                               capture_emit, &capture), -EINVAL);
+    zassert_equal(capture.count, 0U);
+    zassert_equal(codex_rpc_test_emit_json_cstr(unterminated, sizeof(unterminated),
+                                               capture_emit, &capture), -EINVAL);
+    zassert_equal(capture.count, 0U);
+
+    memset(too_long, 'a', sizeof(too_long));
+    too_long[sizeof(too_long) - 1U] = '\0';
+    zassert_equal(codex_rpc_test_emit_json_cstr(too_long, sizeof(too_long),
+                                               capture_emit, &capture), -EMSGSIZE);
+    zassert_equal(capture.count, 0U);
 }
 
 ZTEST(rpc, test_emit_failure_is_returned_unchanged)

@@ -31,3 +31,8 @@ int codex_rpc_dispatch(enum codex_transport source, const uint8_t *json,
                        size_t len, codex_rpc_emit_t emit, void *ctx);
 
 struct codex_device_status codex_device_status_snapshot(void);
+
+#if defined(CONFIG_ZTEST)
+int codex_rpc_test_emit_json_cstr(const char *value, size_t maximum_len,
+                                  codex_rpc_emit_t emit, void *ctx);
+#endif

@@ -16,13 +16,21 @@ struct span {
     size_t len;
 };
 
+enum rpc_dialect {
+    RPC_DIALECT_COMPACT,
+    RPC_DIALECT_STANDARD,
+};
+
 struct request {
     struct span method;
     struct span id;
-    bool has_method;
     bool has_id;
     bool has_jsonrpc;
-    bool compact_method;
+    bool has_compact_method;
+    bool has_standard_method;
+    bool has_compact_params;
+    bool has_standard_params;
+    enum rpc_dialect dialect;
 };
 
 struct writer {
@@ -231,21 +239,14 @@ static size_t skip_value(const uint8_t *json, size_t len, size_t pos)
     return pos;
 }
 
-static bool span_is_integer_or_null(struct span value)
+static bool span_is_id(struct span value)
 {
     if (value.len == 4U && memcmp(value.data, "null", 4U) == 0) {
         return true;
     }
-    if (value.len == 0U || (value.data[0] != '-' &&
-                            (value.data[0] < '0' || value.data[0] > '9'))) {
-        return false;
-    }
-    for (size_t i = value.data[0] == '-' ? 1U : 0U; i < value.len; i++) {
-        if (value.data[i] < '0' || value.data[i] > '9') {
-            return false;
-        }
-    }
-    return true;
+    return (value.len >= 2U && value.data[0] == '"') ||
+           (value.len > 0U && (value.data[0] == '-' ||
+                              (value.data[0] >= '0' && value.data[0] <= '9')));
 }
 
 static bool span_is_params(struct span value)
@@ -259,7 +260,6 @@ static int parse_request(const uint8_t *json, size_t len, struct request *reques
     struct span keys[RPC_MAX_TOP_LEVEL_FIELDS];
     size_t key_count = 0U;
     size_t pos = 0U;
-    bool has_params = false;
 
     if (codex_json_value_validate(json, len, CODEX_JSON_MAX_DEPTH) !=
         CODEX_JSON_COMPLETE) {
@@ -298,24 +298,30 @@ static int parse_request(const uint8_t *json, size_t len, struct request *reques
         value = (struct span){&json[value_start], value_end - value_start};
         pos = value_end;
 
-        if (string_equals_literal(key, "m") ||
-            string_equals_literal(key, "method")) {
-            if (request->has_method || value.len < 2U || value.data[0] != '"') {
+        if (string_equals_literal(key, "m")) {
+            if (request->has_compact_method || value.len < 2U || value.data[0] != '"') {
                 return -EINVAL;
             }
-            request->has_method = true;
-            request->compact_method = string_equals_literal(key, "m");
+            request->has_compact_method = true;
             request->method = value;
-        } else if (string_equals_literal(key, "p") ||
-                   string_equals_literal(key, "params")) {
-            if (has_params || !span_is_params(value)) {
+        } else if (string_equals_literal(key, "method")) {
+            if (request->has_standard_method || value.len < 2U || value.data[0] != '"') {
                 return -EINVAL;
             }
-            has_params = true;
+            request->has_standard_method = true;
+            request->method = value;
+        } else if (string_equals_literal(key, "p")) {
+            if (request->has_compact_params || !span_is_params(value)) {
+                return -EINVAL;
+            }
+            request->has_compact_params = true;
+        } else if (string_equals_literal(key, "params")) {
+            if (request->has_standard_params || !span_is_params(value)) {
+                return -EINVAL;
+            }
+            request->has_standard_params = true;
         } else if (string_equals_literal(key, "id")) {
-            if (request->has_id ||
-                !((value.len >= 2U && value.data[0] == '"') ||
-                  span_is_integer_or_null(value))) {
+            if (request->has_id || !span_is_id(value)) {
                 return -EINVAL;
             }
             request->has_id = true;
@@ -335,9 +341,15 @@ static int parse_request(const uint8_t *json, size_t len, struct request *reques
             return -EINVAL;
         }
     }
-    if (!request->has_method || (!request->compact_method && !request->has_jsonrpc)) {
+    bool compact = request->has_compact_method && !request->has_standard_method &&
+                   !request->has_jsonrpc && !request->has_standard_params;
+    bool standard = request->has_standard_method && request->has_jsonrpc &&
+                    !request->has_compact_method && !request->has_compact_params;
+
+    if (compact == standard) {
         return -EINVAL;
     }
+    request->dialect = compact ? RPC_DIALECT_COMPACT : RPC_DIALECT_STANDARD;
     return 0;
 }
 
@@ -357,6 +369,77 @@ static void write_bytes(struct writer *writer, const void *data, size_t len)
 static void write_literal(struct writer *writer, const char *literal)
 {
     write_bytes(writer, literal, strlen(literal));
+}
+
+static void write_json_string(struct writer *writer, const uint8_t *value, size_t len)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    if (writer->error != 0) {
+        return;
+    }
+    if (value == NULL ||
+        codex_json_utf8_validate(value, len) != CODEX_JSON_COMPLETE) {
+        writer->error = -EINVAL;
+        return;
+    }
+    write_literal(writer, "\"");
+    for (size_t i = 0U; i < len; i++) {
+        uint8_t byte = value[i];
+
+        switch (byte) {
+        case '"':
+            write_literal(writer, "\\\"");
+            break;
+        case '\\':
+            write_literal(writer, "\\\\");
+            break;
+        case '\b':
+            write_literal(writer, "\\b");
+            break;
+        case '\f':
+            write_literal(writer, "\\f");
+            break;
+        case '\n':
+            write_literal(writer, "\\n");
+            break;
+        case '\r':
+            write_literal(writer, "\\r");
+            break;
+        case '\t':
+            write_literal(writer, "\\t");
+            break;
+        default:
+            if (byte < 0x20U) {
+                uint8_t escaped[] = {'\\', 'u', '0', '0',
+                                     (uint8_t)hex[byte >> 4U],
+                                     (uint8_t)hex[byte & 0x0FU]};
+
+                write_bytes(writer, escaped, sizeof(escaped));
+            } else {
+                write_bytes(writer, &byte, 1U);
+            }
+            break;
+        }
+    }
+    write_literal(writer, "\"");
+}
+
+static void write_json_cstr(struct writer *writer, const char *value,
+                            size_t maximum_len)
+{
+    const char *terminator;
+
+    if (writer->error != 0) {
+        return;
+    }
+    if (value == NULL || maximum_len == 0U ||
+        (terminator = memchr(value, '\0', maximum_len)) == NULL) {
+        writer->error = -EINVAL;
+        return;
+    }
+    write_json_string(writer, (const uint8_t *)value,
+                      (size_t)(terminator - value));
 }
 
 static void write_uint(struct writer *writer, uint8_t value)
@@ -404,11 +487,11 @@ next_prefix:
 }
 
 static void write_id_and_close(struct writer *writer, struct span id,
-                               const char *method)
+                               const char *method, enum rpc_dialect dialect)
 {
     write_literal(writer, ",\"id\":");
     write_bytes(writer, id.data, id.len);
-    if (method != NULL) {
+    if (method != NULL && dialect == RPC_DIALECT_COMPACT) {
         write_literal(writer, ",\"method\":\"");
         write_literal(writer, method);
         write_literal(writer, "\"");
@@ -417,35 +500,41 @@ static void write_id_and_close(struct writer *writer, struct span id,
 }
 
 static void write_error(struct writer *writer, int code, const char *message,
-                        struct span id)
+                        struct span id, enum rpc_dialect dialect)
 {
     char code_text[4];
     int code_len = snprintf(code_text, sizeof(code_text), "%d", code);
 
-    write_literal(writer, "{\"error\":{\"code\":");
+    write_literal(writer, dialect == RPC_DIALECT_STANDARD
+                              ? "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":"
+                              : "{\"error\":{\"code\":");
     write_bytes(writer, code_text, (size_t)code_len);
     write_literal(writer, ",\"message\":\"");
     write_literal(writer, message);
     write_literal(writer, "\"}");
-    write_id_and_close(writer, id, NULL);
+    write_id_and_close(writer, id, NULL, dialect);
 }
 
 static void write_success(struct writer *writer, enum method_kind kind,
-                          const char *method, struct span id)
+                          const char *method, struct span id,
+                          enum rpc_dialect dialect)
 {
-    write_literal(writer, "{\"result\":");
+    write_literal(writer, dialect == RPC_DIALECT_STANDARD
+                              ? "{\"jsonrpc\":\"2.0\",\"result\":"
+                              : "{\"result\":");
     switch (kind) {
     case METHOD_SYS_VERSION:
-        write_literal(writer, "{\"version\":\"");
-        write_literal(writer, CODEX_FIRMWARE_VERSION);
-        write_literal(writer, "\"}");
+        write_literal(writer, "{\"version\":");
+        write_json_cstr(writer, CODEX_FIRMWARE_VERSION,
+                        sizeof(CODEX_FIRMWARE_VERSION));
+        write_literal(writer, "}");
         break;
     case METHOD_DEVICE_STATUS: {
         struct codex_device_status status = codex_device_status_snapshot();
 
-        write_literal(writer, "{\"version\":\"");
-        write_literal(writer, status.version);
-        write_literal(writer, "\",\"profile_index\":");
+        write_literal(writer, "{\"version\":");
+        write_json_cstr(writer, status.version, sizeof(CODEX_FIRMWARE_VERSION));
+        write_literal(writer, ",\"profile_index\":");
         write_uint(writer, status.profile_index);
         write_literal(writer, ",\"layer_index\":");
         write_uint(writer, status.layer_index);
@@ -471,8 +560,25 @@ static void write_success(struct writer *writer, enum method_kind kind,
     default:
         return;
     }
-    write_id_and_close(writer, id, method);
+    write_id_and_close(writer, id, method, dialect);
 }
+
+#if defined(CONFIG_ZTEST)
+int codex_rpc_test_emit_json_cstr(const char *value, size_t maximum_len,
+                                  codex_rpc_emit_t emit, void *ctx)
+{
+    struct writer writer = {0};
+
+    if (emit == NULL) {
+        return -EINVAL;
+    }
+    write_json_cstr(&writer, value, maximum_len);
+    if (writer.error != 0) {
+        return writer.error;
+    }
+    return emit(CODEX_TRANSPORT_USB, writer.data, writer.len, ctx);
+}
+#endif
 
 int codex_rpc_dispatch(enum codex_transport source, const uint8_t *json,
                        size_t len, codex_rpc_emit_t emit, void *ctx)
@@ -500,12 +606,12 @@ int codex_rpc_dispatch(enum codex_transport source, const uint8_t *json,
     }
     if (kind == METHOD_UNKNOWN) {
         write_error(&writer, CODEX_RPC_ERROR_METHOD_NOT_FOUND, "Method not found",
-                    request.id);
+                    request.id, request.dialect);
     } else if (kind == METHOD_FORBIDDEN) {
         write_error(&writer, CODEX_RPC_ERROR_FORBIDDEN, "Method forbidden",
-                    request.id);
+                    request.id, request.dialect);
     } else {
-        write_success(&writer, kind, canonical, request.id);
+        write_success(&writer, kind, canonical, request.id, request.dialect);
     }
     if (writer.error != 0) {
         return writer.error;

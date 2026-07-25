@@ -23,5 +23,7 @@ struct codex_json_scan {
 struct codex_json_scan codex_json_value_scan(const uint8_t *data, size_t len,
                                              size_t maximum_depth);
 
+enum codex_json_result codex_json_utf8_validate(const uint8_t *data, size_t len);
+
 enum codex_json_result codex_json_value_validate(const uint8_t *data, size_t len,
                                                  size_t maximum_depth);
