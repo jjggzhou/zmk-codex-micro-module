@@ -2,7 +2,7 @@ config CODEX_MICRO
     bool "Codex Micro support"
     select ZMK_HID_INDICATORS
     select ZMK_POINTING
-    select BT_GATT_AUTO_UPDATE_MTU
+    select BT_GATT_AUTO_UPDATE_MTU if ZMK_BLE
 
 if CODEX_MICRO
 

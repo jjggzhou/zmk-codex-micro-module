@@ -19,3 +19,7 @@ config ZMK_HID_CONSUMER_REPORT_USAGES_BASIC
 config ZMK_HID_INDICATORS
     bool
     default y
+
+config ZMK_POINTING
+    bool
+    default y

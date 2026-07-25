@@ -32,18 +32,19 @@ static uint32_t item_value(const uint8_t *bytes, size_t len)
     return value;
 }
 
-static size_t parse_shapes(struct report_shape *shapes, size_t capacity)
+static size_t parse_shapes(const uint8_t *descriptor, size_t descriptor_size,
+                           struct report_shape *shapes, size_t capacity)
 {
     uint8_t id = 0;
     uint16_t size = 0;
     uint16_t count = 0;
     size_t used = 0;
 
-    for (size_t i = 0; i < codex_ble_report_map_size();) {
-        uint8_t prefix = codex_ble_report_map[i++];
+    for (size_t i = 0; i < descriptor_size;) {
+        uint8_t prefix = descriptor[i++];
         size_t len = item_size(prefix);
-        zassert_true(prefix != 0xfe && i + len <= codex_ble_report_map_size());
-        uint32_t value = item_value(&codex_ble_report_map[i], len);
+        zassert_true(prefix != 0xfe && i + len <= descriptor_size);
+        uint32_t value = item_value(&descriptor[i], len);
 
         if (prefix == 0x85) {
             id = value;
@@ -84,7 +85,8 @@ static uint16_t bits_for(const struct report_shape *shapes, size_t used, uint8_t
 ZTEST(codex_ble_map, test_every_report_matches_the_production_gatt_contract)
 {
     struct report_shape shapes[8] = {0};
-    size_t used = parse_shapes(shapes, ARRAY_SIZE(shapes));
+    size_t used = parse_shapes(codex_ble_report_map, codex_ble_report_map_size(),
+                               shapes, ARRAY_SIZE(shapes));
 
     zassert_equal(codex_ble_report_map_size(), 240);
     zassert_equal(used, 7, "map contains an orphan or missing report type");
@@ -95,6 +97,19 @@ ZTEST(codex_ble_map, test_every_report_matches_the_production_gatt_contract)
     zassert_equal(bits_for(shapes, used, 6, HID_INPUT), 63U * 8U);
     zassert_equal(bits_for(shapes, used, 6, HID_OUTPUT), 63U * 8U);
     zassert_equal(bits_for(shapes, used, 6, HID_FEATURE), 63U * 8U);
+}
+
+ZTEST(codex_ble_map, test_mouse_payload_is_usb_five_bytes_but_ble_runtime_nine_bytes)
+{
+    struct report_shape usb[8] = {0};
+    struct report_shape ble[8] = {0};
+    size_t usb_used = parse_shapes(codex_usb_report_descriptor,
+                                   codex_usb_report_descriptor_size(), usb, ARRAY_SIZE(usb));
+    size_t ble_used = parse_shapes(codex_ble_report_map, codex_ble_report_map_size(),
+                                   ble, ARRAY_SIZE(ble));
+
+    zassert_equal(bits_for(usb, usb_used, 3, HID_INPUT), 5U * 8U);
+    zassert_equal(bits_for(ble, ble_used, 3, HID_INPUT), 9U * 8U);
 }
 
 ZTEST(codex_ble_map, test_vendor_feature_has_exact_stable_write_semantics)

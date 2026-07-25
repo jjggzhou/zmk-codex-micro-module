@@ -3,7 +3,12 @@ set(KCONFIG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/Kconfig)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(codex_rpc_tests)
 
-get_filename_component(ZMK_SOURCE_DIR "${ZEPHYR_BASE}/../zmk" ABSOLUTE)
+execute_process(
+  COMMAND west list zmk -f {abspath}
+  OUTPUT_VARIABLE ZMK_SOURCE_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY
+)
 target_include_directories(app PRIVATE
   "${ZMK_SOURCE_DIR}/app/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../src/protocol"

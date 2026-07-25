@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Prove Codex BLE production sources are absent when CONFIG_CODEX_MICRO=n."""
+
+import argparse
+import json
+import pathlib
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("build_dir", type=pathlib.Path)
+    args = parser.parse_args()
+    build = args.build_dir.resolve()
+    config = (build / "zephyr" / ".config").read_text().splitlines()
+    assert "# CONFIG_CODEX_MICRO is not set" in config
+
+    commands = json.loads((build / "compile_commands.json").read_text())
+    sources = {pathlib.PurePosixPath(entry["file"]).as_posix() for entry in commands}
+    forbidden_suffixes = (
+        "/src/descriptors/ble_report_map.c",
+        "/src/transport/ble_queue.c",
+        "/src/transport/ble_report_state.c",
+        "/src/transport/ble_hids.c",
+    )
+    found = sorted(source for source in sources if source.endswith(forbidden_suffixes))
+    assert not found, f"Codex BLE production sources leaked into non-Codex build: {found}"
+    print("non-Codex compile probe: CONFIG_CODEX_MICRO=n and zero Codex BLE production sources")
+
+
+if __name__ == "__main__":
+    main()

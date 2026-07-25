@@ -4,6 +4,7 @@
 import argparse
 import json
 import pathlib
+import subprocess
 import struct
 
 from elftools.elf.elffile import ELFFile
@@ -21,6 +22,22 @@ def main() -> None:
     replacement = [p for p in sources if p.endswith("/src/transport/ble_hids.c")]
     assert not upstream, f"upstream hog.c still compiled: {upstream}"
     assert len(replacement) == 1, f"replacement count={len(replacement)}"
+
+    objdump = "/opt/zephyr-sdk-0.16.3/arm-zephyr-eabi/bin/arm-zephyr-eabi-objdump"
+    disassembly = subprocess.run(
+        [objdump, "-d", str(elf_path)], check=True, capture_output=True, text=True
+    ).stdout
+
+    def function_body(name: str) -> str:
+        marker = f"<{name}>:"
+        start = disassembly.index(marker)
+        end = disassembly.find("\n\n", start)
+        return disassembly[start:] if end < 0 else disassembly[start:end]
+
+    mouse_sender = function_body("zmk_endpoints_send_mouse_report")
+    mouse_wrapper = function_body("__wrap_zmk_usb_hid_send_mouse_report")
+    assert "<__wrap_zmk_usb_hid_send_mouse_report>" in mouse_sender
+    assert "<__wrap_hid_int_ep_write>" in mouse_wrapper
 
     config = (build / "zephyr" / ".config").read_text().splitlines()
     wanted = {
@@ -103,6 +120,7 @@ def main() -> None:
         assert sorted(refs) == sorted(expected_refs), f"Report References={refs}"
 
     print("offline ELF probe: one HIDS, 32 attrs, exact refs/CCC/encryption, auto MTU exchange")
+    print("USB mouse endpoint calls the ABI converter, which calls the shared serialized HID writer")
     print("physical live GATT round-trip is intentionally deferred to Task 16")
 
 

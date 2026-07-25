@@ -8,6 +8,7 @@
 
 #include <codex/descriptor.h>
 #include <codex/usb.h>
+#include <zmk/hid.h>
 
 static const struct device *registered_device;
 static const uint8_t *registered_descriptor;
@@ -22,6 +23,11 @@ static size_t received_count;
 static size_t bad_report_count;
 static size_t upstream_set_report_count;
 static size_t upstream_in_ready_count;
+static struct zmk_hid_mouse_report mouse_report = {
+    .report_id = ZMK_HID_REPORT_ID_MOUSE,
+};
+static enum usb_dc_status_code usb_status = USB_DC_CONFIGURED;
+static size_t wakeup_count;
 
 #if defined(CONFIG_HID_INTERRUPT_EP_MPS)
 #define CODEX_TEST_HID_INTERRUPT_EP_MPS CONFIG_HID_INTERRUPT_EP_MPS
@@ -143,6 +149,9 @@ void codex_test_usb_fakes_reset(void)
     bad_report_count = 0U;
     upstream_set_report_count = 0U;
     upstream_in_ready_count = 0U;
+    memset(&mouse_report.body, 0, sizeof(mouse_report.body));
+    usb_status = USB_DC_CONFIGURED;
+    wakeup_count = 0U;
     memset(descriptor_block.manufacturer.bString, 0xA5,
            sizeof(descriptor_block.manufacturer.bString));
     memset(descriptor_block.product.bString, 0x5A, sizeof(descriptor_block.product.bString));
@@ -192,6 +201,16 @@ int hid_int_ep_write(const struct device *dev, const uint8_t *data, uint32_t dat
     return 0;
 }
 
+struct zmk_hid_mouse_report *zmk_hid_get_mouse_report(void) { return &mouse_report; }
+
+enum usb_dc_status_code zmk_usb_get_status(void) { return usb_status; }
+
+int usb_wakeup_request(void)
+{
+    wakeup_count++;
+    return 0;
+}
+
 void codex_usb_vendor_payload_received(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
 {
     memcpy(received_payload, payload, sizeof(received_payload));
@@ -232,6 +251,12 @@ void codex_test_complete_write(void)
         registered_ops->int_in_ready(registered_device);
     }
 }
+
+void codex_test_set_mouse_report(struct zmk_hid_mouse_report report) { mouse_report = report; }
+
+void codex_test_set_usb_status(enum usb_dc_status_code status) { usb_status = status; }
+
+size_t codex_test_wakeup_count(void) { return wakeup_count; }
 
 size_t codex_test_received_count(void) { return received_count; }
 

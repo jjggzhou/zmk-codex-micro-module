@@ -14,6 +14,7 @@
 #include <codex/descriptor.h>
 #include <codex/usb.h>
 #include <zmk/hid.h>
+#include <zmk/usb_hid.h>
 
 #include "usb_fakes.h"
 
@@ -209,6 +210,60 @@ ZTEST(usb_identity, test_vendor_send_keeps_report_id_outside_payload)
     zassert_equal(codex_test_last_write()[0], CODEX_VENDOR_REPORT_ID);
     zassert_mem_equal(&codex_test_last_write()[1], original, sizeof(original));
     zassert_mem_equal(payload, original, sizeof(original));
+    codex_test_complete_write();
+}
+
+ZTEST(usb_identity, test_mouse_send_converts_nine_byte_body_to_exact_five_byte_usb_payload)
+{
+    struct zmk_hid_mouse_report report = {
+        .report_id = ZMK_HID_REPORT_ID_MOUSE,
+        .body = {
+            .buttons = 0xff,
+            .d_x = INT16_MAX,
+            .d_y = INT16_MIN,
+            .d_scroll_y = 126,
+            .d_scroll_x = -126,
+        },
+    };
+    static const uint8_t expected[] = {0x03, 0x1f, 0x7f, 0x81, 0x7e, 0x82};
+
+    codex_test_set_mouse_report(report);
+    zassert_ok(zmk_usb_hid_send_mouse_report());
+    zassert_equal(codex_test_last_write_size(), sizeof(expected));
+    zassert_mem_equal(codex_test_last_write(), expected, sizeof(expected));
+    codex_test_complete_write();
+
+    report.body.d_x = -127;
+    report.body.d_y = 127;
+    report.body.d_scroll_y = -128;
+    report.body.d_scroll_x = 128;
+    codex_test_set_mouse_report(report);
+    zassert_ok(zmk_usb_hid_send_mouse_report());
+    zassert_equal(codex_test_last_write()[2], 0x81);
+    zassert_equal(codex_test_last_write()[3], 0x7f);
+    zassert_equal(codex_test_last_write()[4], 0x81,
+                  "-128 saturates to descriptor minimum -127");
+    zassert_equal(codex_test_last_write()[5], 0x7f);
+    codex_test_complete_write();
+}
+
+ZTEST(usb_identity, test_mouse_send_preserves_zmk_usb_status_semantics)
+{
+    struct zmk_hid_mouse_report report = {.report_id = ZMK_HID_REPORT_ID_MOUSE};
+
+    codex_test_set_mouse_report(report);
+    codex_test_set_usb_status(USB_DC_SUSPEND);
+    zassert_ok(zmk_usb_hid_send_mouse_report());
+    zassert_equal(codex_test_wakeup_count(), 1U);
+    zassert_equal(codex_test_write_attempt_count(), 0U);
+
+    codex_test_set_usb_status(USB_DC_DISCONNECTED);
+    zassert_equal(zmk_usb_hid_send_mouse_report(), -ENODEV);
+    zassert_equal(codex_test_write_attempt_count(), 0U);
+
+    codex_test_set_usb_status(USB_DC_CONFIGURED);
+    zassert_ok(zmk_usb_hid_send_mouse_report());
+    zassert_equal(codex_test_write_attempt_count(), 1U);
     codex_test_complete_write();
 }
 

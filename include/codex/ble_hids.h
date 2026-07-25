@@ -14,8 +14,17 @@ enum codex_ble_report_type {
 
 int codex_ble_vendor_notify(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
 
-/* Task 4 connects this worker-context seam to the framing ingress queue. */
+struct codex_ble_source_token {
+    uint8_t profile_index;
+    uint32_t connection_generation;
+};
+
+/* Task 7 connects these worker-context seams to the endpoint router. */
 void codex_ble_vendor_output_received(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);
+void codex_ble_vendor_output_received_with_token(
+    const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],
+    const struct codex_ble_source_token *token);
+void codex_ble_hids_purge_queues(void);
 
 /* Stable Feature report state used by the encrypted GATT read/write callbacks. */
 int codex_ble_vendor_feature_get(uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE]);

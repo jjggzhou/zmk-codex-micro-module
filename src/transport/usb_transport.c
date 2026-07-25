@@ -1,6 +1,7 @@
 #include <codex/usb.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
 
 #include <zephyr/device.h>
@@ -11,6 +12,7 @@
 #include <zephyr/usb/class/usb_hid.h>
 
 #include <zmk/hid.h>
+#include <zmk/usb.h>
 
 #define HID_REPORT_TYPE_MASK UINT16_C(0xFF00)
 #define HID_REPORT_ID_MASK UINT16_C(0x00FF)
@@ -40,10 +42,16 @@ BUILD_ASSERT(CONFIG_ZMK_HID_CONSUMER_REPORT_SIZE == 1,
              "Codex Micro golden descriptor requires one consumer usage");
 BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_HID_INDICATORS),
              "Codex Micro golden descriptor requires the LED output report");
+BUILD_ASSERT(!IS_ENABLED(CONFIG_ZMK_USB_BOOT),
+             "Codex Micro exact composite descriptor does not expose boot protocol");
 BUILD_ASSERT(sizeof(struct zmk_hid_keyboard_report) == 9U,
              "ZMK keyboard runtime report does not match the golden descriptor");
 BUILD_ASSERT(sizeof(struct zmk_hid_consumer_report) == 3U,
              "ZMK consumer runtime report does not match the golden descriptor");
+#if IS_ENABLED(CONFIG_ZMK_POINTING)
+BUILD_ASSERT(sizeof(struct zmk_hid_mouse_report_body) == 9U,
+             "ZMK mouse body is the expected BLE ABI before USB conversion");
+#endif
 
 static const struct device *codex_hid_device;
 static const struct hid_ops *zmk_hid_ops;
@@ -181,3 +189,44 @@ int codex_usb_send_vendor(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
 
     return hid_int_ep_write(codex_hid_device, wire_report, sizeof(wire_report), NULL);
 }
+
+#if IS_ENABLED(CONFIG_ZMK_POINTING)
+static int8_t codex_mouse_axis_to_usb(int16_t value)
+{
+    if (value > INT8_MAX) {
+        return INT8_MAX;
+    }
+    if (value < -INT8_MAX) {
+        return -INT8_MAX;
+    }
+    return (int8_t)value;
+}
+
+int __wrap_zmk_usb_hid_send_mouse_report(void)
+{
+    const struct zmk_hid_mouse_report *report = zmk_hid_get_mouse_report();
+    const uint8_t wire_report[6] = {
+        ZMK_HID_REPORT_ID_MOUSE,
+        report->body.buttons & BIT_MASK(ZMK_HID_MOUSE_NUM_BUTTONS),
+        (uint8_t)codex_mouse_axis_to_usb(report->body.d_x),
+        (uint8_t)codex_mouse_axis_to_usb(report->body.d_y),
+        (uint8_t)codex_mouse_axis_to_usb(report->body.d_scroll_y),
+        (uint8_t)codex_mouse_axis_to_usb(report->body.d_scroll_x),
+    };
+
+    switch (zmk_usb_get_status()) {
+    case USB_DC_SUSPEND:
+        return usb_wakeup_request();
+    case USB_DC_ERROR:
+    case USB_DC_RESET:
+    case USB_DC_DISCONNECTED:
+    case USB_DC_UNKNOWN:
+        return -ENODEV;
+    default:
+        if (codex_hid_device == NULL) {
+            return -ENODEV;
+        }
+        return hid_int_ep_write(codex_hid_device, wire_report, sizeof(wire_report), NULL);
+    }
+}
+#endif

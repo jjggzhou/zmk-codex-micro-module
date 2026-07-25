@@ -17,12 +17,17 @@
 #include <zephyr/bluetooth/att.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include <zmk/ble.h>
+#include <zmk/event_manager.h>
+#include <zmk/events/ble_active_profile_changed.h>
 #include <zmk/hid.h>
 
 #include <codex/ble_hids.h>
+
+#include "ble_queue.h"
 
 BUILD_ASSERT(CONFIG_BT_L2CAP_TX_MTU == 69, "Codex BLE ATT TX MTU contract changed");
 BUILD_ASSERT(CONFIG_BT_BUF_ACL_RX_SIZE == 73, "Codex BLE ACL RX buffer contract changed");
@@ -65,13 +70,90 @@ K_MUTEX_DEFINE(vendor_output_lock);
 static uint8_t vendor_input_state[CODEX_VENDOR_PAYLOAD_SIZE];
 K_MUTEX_DEFINE(vendor_input_lock);
 
-K_MSGQ_DEFINE(vendor_output_msgq, CODEX_VENDOR_PAYLOAD_SIZE, 4, 4);
-K_MSGQ_DEFINE(vendor_notify_msgq, CODEX_VENDOR_PAYLOAD_SIZE, 4, 4);
+K_MSGQ_DEFINE(vendor_output_msgq, sizeof(struct codex_ble_owned_item), 4, 4);
+K_MSGQ_DEFINE(vendor_notify_msgq, sizeof(struct codex_ble_owned_item), 4, 4);
+static atomic_t connection_generation;
 
 __weak void
 codex_ble_vendor_output_received(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
 {
     ARG_UNUSED(payload);
+}
+
+__weak void codex_ble_vendor_output_received_with_token(
+    const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],
+    const struct codex_ble_source_token *token)
+{
+    ARG_UNUSED(token);
+    codex_ble_vendor_output_received(payload);
+}
+
+static void *codex_bt_conn_ref(void *connection)
+{
+    return bt_conn_ref(connection);
+}
+
+static void codex_bt_conn_unref(void *connection)
+{
+    bt_conn_unref(connection);
+}
+
+static bool queue_item_is_current(const struct codex_ble_owned_item *item,
+                                  const struct bt_gatt_attr *input_attr,
+                                  bool require_subscription)
+{
+    struct bt_conn *active;
+    int active_profile;
+    bool current;
+
+    if (item->token.connection_generation != (uint32_t)atomic_get(&connection_generation)) {
+        return false;
+    }
+    active = zmk_ble_active_profile_conn();
+    if (active == NULL) {
+        return false;
+    }
+    active_profile = zmk_ble_profile_index(bt_conn_get_dst(active));
+    current = active == item->connection && active_profile == item->token.profile_index;
+    bt_conn_unref(active);
+    if (!current) {
+        return false;
+    }
+    if (require_subscription &&
+        (!bt_gatt_is_subscribed(item->connection, input_attr, BT_GATT_CCC_NOTIFY) ||
+         bt_gatt_get_mtu(item->connection) < CODEX_VENDOR_PAYLOAD_SIZE + 3U)) {
+        return false;
+    }
+    return true;
+}
+
+static int queue_item_capture(struct codex_ble_owned_item *item, struct bt_conn *conn,
+                              const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
+{
+    int profile;
+
+    if (conn == NULL) {
+        return -ENOTCONN;
+    }
+    profile = zmk_ble_profile_index(bt_conn_get_dst(conn));
+    if (profile < 0 || profile > UINT8_MAX) {
+        return -ENOTCONN;
+    }
+    return codex_ble_owned_item_capture(item, conn, (uint8_t)profile,
+                                        (uint32_t)atomic_get(&connection_generation), payload,
+                                        codex_bt_conn_ref);
+}
+
+static void queue_item_release(struct codex_ble_owned_item *item)
+{
+    codex_ble_owned_item_release(item, codex_bt_conn_unref);
+}
+
+static void vendor_output_emit(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE],
+                               const struct codex_ble_source_token *token, void *context)
+{
+    ARG_UNUSED(context);
+    codex_ble_vendor_output_received_with_token(payload, token);
 }
 
 static ssize_t read_codex_report_ref(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -131,11 +213,25 @@ static ssize_t read_codex_input(struct bt_conn *conn, const struct bt_gatt_attr 
 
 static void vendor_output_work_handler(struct k_work *work)
 {
-    uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE];
+    struct codex_ble_owned_item item;
 
     ARG_UNUSED(work);
-    while (k_msgq_get(&vendor_output_msgq, payload, K_NO_WAIT) == 0) {
-        codex_ble_vendor_output_received(payload);
+    while (k_msgq_get(&vendor_output_msgq, &item, K_NO_WAIT) == 0) {
+        struct bt_conn *active = zmk_ble_active_profile_conn();
+        uint8_t active_profile = UINT8_MAX;
+
+        if (active != NULL) {
+            int profile = zmk_ble_profile_index(bt_conn_get_dst(active));
+            if (profile >= 0 && profile <= UINT8_MAX) {
+                active_profile = (uint8_t)profile;
+            }
+        }
+        codex_ble_owned_item_dispatch(&item, active, active_profile,
+                                      (uint32_t)atomic_get(&connection_generation),
+                                      vendor_output_emit, NULL, codex_bt_conn_unref);
+        if (active != NULL) {
+            bt_conn_unref(active);
+        }
     }
 }
 K_WORK_DEFINE(vendor_output_work, vendor_output_work_handler);
@@ -144,6 +240,7 @@ static ssize_t write_codex_output(struct bt_conn *conn, const struct bt_gatt_att
                                   const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
     int err;
+    struct codex_ble_owned_item item;
 
     ARG_UNUSED(conn);
     ARG_UNUSED(attr);
@@ -155,8 +252,13 @@ static ssize_t write_codex_output(struct bt_conn *conn, const struct bt_gatt_att
     } else if (err == -EMSGSIZE) {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
-    err = k_msgq_put(&vendor_output_msgq, buf, K_NO_WAIT);
+    err = queue_item_capture(&item, conn, buf);
     if (err != 0) {
+        return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+    }
+    err = k_msgq_put(&vendor_output_msgq, &item, K_NO_WAIT);
+    if (err != 0) {
+        queue_item_release(&item);
         return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
     }
     k_mutex_lock(&vendor_output_lock, K_FOREVER);
@@ -205,35 +307,29 @@ BUILD_ASSERT(ARRAY_SIZE(attr_hog_svc) == 32U, "pinned HIDS attribute layout chan
 
 static void vendor_notify_work_handler(struct k_work *work)
 {
-    uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE];
+    struct codex_ble_owned_item item;
 
     ARG_UNUSED(work);
-    while (k_msgq_get(&vendor_notify_msgq, payload, K_NO_WAIT) == 0) {
-        struct bt_conn *conn = zmk_ble_active_profile_conn();
+    while (k_msgq_get(&vendor_notify_msgq, &item, K_NO_WAIT) == 0) {
         struct bt_gatt_notify_params params = {
             .attr = &hog_svc.attrs[CODEX_VENDOR_INPUT_DECL_ATTR_INDEX],
-            .data = payload,
-            .len = sizeof(payload),
+            .data = item.payload,
+            .len = sizeof(item.payload),
         };
 
-        if (conn == NULL) {
-            continue;
-        }
-        if (codex_ble_vendor_notify_preflight(
-                true, bt_gatt_is_subscribed(conn, params.attr, BT_GATT_CCC_NOTIFY),
-                bt_gatt_get_mtu(conn), payload) != 0) {
-            bt_conn_unref(conn);
+        if (!queue_item_is_current(&item, params.attr, true)) {
+            queue_item_release(&item);
             continue;
         }
         k_mutex_lock(&vendor_input_lock, K_FOREVER);
-        memcpy(vendor_input_state, payload, sizeof(vendor_input_state));
+        memcpy(vendor_input_state, item.payload, sizeof(vendor_input_state));
         k_mutex_unlock(&vendor_input_lock);
         /* Zephyr 3.5 copies params.data into a net_buf before returning. */
-        int err = bt_gatt_notify_cb(conn, &params);
+        int err = bt_gatt_notify_cb(item.connection, &params);
         if (err == -EPERM) {
-            bt_conn_set_security(conn, BT_SECURITY_L2);
+            bt_conn_set_security(item.connection, BT_SECURITY_L2);
         }
-        bt_conn_unref(conn);
+        queue_item_release(&item);
     }
 }
 K_WORK_DEFINE(vendor_notify_work, vendor_notify_work_handler);
@@ -241,17 +337,79 @@ K_WORK_DEFINE(vendor_notify_work, vendor_notify_work_handler);
 int codex_ble_vendor_notify(const uint8_t payload[CODEX_VENDOR_PAYLOAD_SIZE])
 {
     int err;
+    struct bt_conn *conn;
+    struct codex_ble_owned_item item;
 
     if (payload == NULL) {
         return -EINVAL;
     }
-    err = k_msgq_put(&vendor_notify_msgq, payload, K_NO_WAIT);
+    conn = zmk_ble_active_profile_conn();
+    if (conn == NULL) {
+        return -ENOTCONN;
+    }
+    err = codex_ble_vendor_notify_preflight(
+        true,
+        bt_gatt_is_subscribed(conn, &hog_svc.attrs[CODEX_VENDOR_INPUT_DECL_ATTR_INDEX],
+                              BT_GATT_CCC_NOTIFY),
+        bt_gatt_get_mtu(conn), payload);
+    if (err == 0) {
+        err = queue_item_capture(&item, conn, payload);
+    }
+    bt_conn_unref(conn);
     if (err != 0) {
+        return err;
+    }
+    err = k_msgq_put(&vendor_notify_msgq, &item, K_NO_WAIT);
+    if (err != 0) {
+        queue_item_release(&item);
         return err;
     }
     k_work_submit(&vendor_notify_work);
     return 0;
 }
+
+void codex_ble_hids_purge_queues(void)
+{
+    struct codex_ble_owned_item item;
+
+    atomic_inc(&connection_generation);
+    while (k_msgq_get(&vendor_notify_msgq, &item, K_NO_WAIT) == 0) {
+        queue_item_release(&item);
+    }
+    while (k_msgq_get(&vendor_output_msgq, &item, K_NO_WAIT) == 0) {
+        queue_item_release(&item);
+    }
+}
+
+static void codex_ble_connected(struct bt_conn *conn, uint8_t err)
+{
+    ARG_UNUSED(conn);
+    if (err == 0U) {
+        codex_ble_hids_purge_queues();
+    }
+}
+
+static void codex_ble_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+    ARG_UNUSED(conn);
+    ARG_UNUSED(reason);
+    codex_ble_hids_purge_queues();
+}
+
+BT_CONN_CB_DEFINE(codex_ble_connection_callbacks) = {
+    .connected = codex_ble_connected,
+    .disconnected = codex_ble_disconnected,
+};
+
+static int codex_ble_profile_changed_listener(const zmk_event_t *event)
+{
+    ARG_UNUSED(event);
+    codex_ble_hids_purge_queues();
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(codex_ble_hids_profile_guard, codex_ble_profile_changed_listener);
+ZMK_SUBSCRIPTION(codex_ble_hids_profile_guard, zmk_ble_active_profile_changed);
 
 const struct codex_ble_gatt_contract codex_ble_gatt_contract[]
     __attribute__((used)) = {
