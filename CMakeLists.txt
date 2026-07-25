@@ -1,0 +1,2 @@
+zephyr_library_named(codex_micro)
+zephyr_include_directories(include)

@@ -1,0 +1,6 @@
+tests:
+  codex.smoke:
+    platform_allow:
+      - native_posix_64
+    tags:
+      - codex_micro

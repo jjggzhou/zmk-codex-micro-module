@@ -1,0 +1,6 @@
+#pragma once
+#include <stdint.h>
+
+#define CODEX_VENDOR_REPORT_ID UINT8_C(0x06)
+#define CODEX_VENDOR_PAYLOAD_SIZE 63U
+#define CODEX_INTERNAL_REPORT_SIZE 64U

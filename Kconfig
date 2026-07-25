@@ -1,0 +1,2 @@
+config CODEX_MICRO
+    bool "Codex Micro support"
