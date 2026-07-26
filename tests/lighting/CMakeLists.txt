@@ -9,7 +9,10 @@ target_include_directories(app PRIVATE
 
 target_sources(app PRIVATE
   src/model_test.c
+  src/renderer_test.c
   ../../src/protocol/json_value.c
   ../../src/lighting/model.c
   ../../src/lighting/effects.c
+  ../../src/lighting/renderer.c
+  ../../src/state/indicators.c
 )

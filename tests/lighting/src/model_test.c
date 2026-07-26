@@ -13,7 +13,7 @@ static bool commit_barrier_enabled;
 static atomic_t commit_barrier_arrivals;
 static struct k_sem commit_barrier_release;
 
-void codex_lighting_changed(void)
+void codex_renderer_test_changed_hook(void)
 {
     changed_count++;
 }

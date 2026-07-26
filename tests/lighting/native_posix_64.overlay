@@ -1,0 +1,15 @@
+/ {
+    codex_rgb_zones: codex_rgb_zones {
+        compatible = "codex,rgb-zones";
+        status = "okay";
+        pixel-count = <12>;
+        keys = <8 0 6 2>;
+        ambient = <9 1>;
+        agent-0 = <3>;
+        agent-1 = <4>;
+        agent-2 = <5>;
+        agent-3 = <7>;
+        agent-4 = <10>;
+        agent-5 = <11>;
+    };
+};

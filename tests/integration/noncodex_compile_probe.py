@@ -31,6 +31,7 @@ def main() -> None:
         "/src/state/indicators.c",
         "/src/lighting/model.c",
         "/src/lighting/effects.c",
+        "/src/lighting/renderer.c",
     )
     found = sorted(source for source in sources if source.endswith(forbidden_suffixes))
     assert not found, f"Codex production sources leaked into non-Codex build: {found}"

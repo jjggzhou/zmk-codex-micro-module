@@ -1,0 +1,38 @@
+description: Codex Micro logical RGB zone membership in physical strip order
+
+compatible: "codex,rgb-zones"
+
+properties:
+  pixel-count:
+    type: int
+    required: true
+    description: Total physical RGB pixels addressable by the renderer
+
+  keys:
+    type: array
+    required: true
+    description: Physical pixel indices for key backlighting
+
+  ambient:
+    type: array
+    required: true
+    description: Physical pixel indices for ambient underglow
+
+  agent-0:
+    type: array
+    required: true
+  agent-1:
+    type: array
+    required: true
+  agent-2:
+    type: array
+    required: true
+  agent-3:
+    type: array
+    required: true
+  agent-4:
+    type: array
+    required: true
+  agent-5:
+    type: array
+    required: true

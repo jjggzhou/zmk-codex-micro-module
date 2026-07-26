@@ -1,3 +1,6 @@
 mainmenu "Codex lighting tests"
 
+config ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE
+    bool "Test ZMK RGB idle gate"
+
 source "Kconfig.zephyr"

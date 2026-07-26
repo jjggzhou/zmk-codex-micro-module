@@ -15,6 +15,7 @@ target_sources_ifdef(CONFIG_CODEX_MICRO codex_micro PRIVATE
   src/protocol/device_status.c
   src/lighting/model.c
   src/lighting/effects.c
+  src/lighting/renderer.c
   src/input/codex_keys.c
   src/input/encoder.c
   src/input/touch_control.c
