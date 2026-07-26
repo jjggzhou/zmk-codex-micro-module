@@ -21,6 +21,80 @@ target_sources_ifdef(CONFIG_CODEX_ANALOG_STICK codex_micro PRIVATE
   src/input/analog_stick.c
 )
 
+# badjeff 2684f22 has an unsigned reverse loop which walks past index zero when
+# every report-on-change-only channel is unchanged. Keep west pinned to that
+# audited commit, verify both commit and source hash, then generate the one-line
+# MIT-preserving correction in the build tree and replace only that library source.
+if(CONFIG_ANALOG_INPUT)
+  set(CODEX_ANALOG_UPSTREAM_DIR "${ZEPHYR_ZMK_ANALOG_INPUT_DRIVER_MODULE_DIR}")
+  set(CODEX_ANALOG_UPSTREAM_SOURCE "${CODEX_ANALOG_UPSTREAM_DIR}/src/analog_input.c")
+  set(CODEX_ANALOG_UPSTREAM_COMMIT "2684f22ee7e2168d4393f7e63676912210a796fc")
+  set(CODEX_ANALOG_UPSTREAM_SHA256 "a506f92c2df688b90f34189bcc7f9fba954214248c12afcc01ac8d64944131af")
+  execute_process(COMMAND git -C "${CODEX_ANALOG_UPSTREAM_DIR}" rev-parse HEAD
+    OUTPUT_VARIABLE CODEX_ANALOG_ACTUAL_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE CODEX_ANALOG_GIT_RESULT)
+  file(SHA256 "${CODEX_ANALOG_UPSTREAM_SOURCE}" CODEX_ANALOG_ACTUAL_SHA256)
+  if(NOT CODEX_ANALOG_GIT_RESULT EQUAL 0 OR
+     NOT CODEX_ANALOG_ACTUAL_COMMIT STREQUAL CODEX_ANALOG_UPSTREAM_COMMIT OR
+     NOT CODEX_ANALOG_ACTUAL_SHA256 STREQUAL CODEX_ANALOG_UPSTREAM_SHA256)
+    message(FATAL_ERROR "Codex analog override requires audited badjeff 2684f22 source")
+  endif()
+  file(READ "${CODEX_ANALOG_UPSTREAM_SOURCE}" CODEX_ANALOG_PATCHED_SOURCE)
+  set(CODEX_ANALOG_ORIGINAL_SOURCE "${CODEX_ANALOG_PATCHED_SOURCE}")
+  set(CODEX_ANALOG_BAD_LOOP "for (uint8_t i = config->io_channels_len - 1; i >= 0; i--)")
+  set(CODEX_ANALOG_GOOD_LOOP "for (int i = (int)config->io_channels_len - 1; i >= 0; i--)")
+  string(REPLACE "${CODEX_ANALOG_BAD_LOOP}" "${CODEX_ANALOG_GOOD_LOOP}"
+    CODEX_ANALOG_PATCHED_SOURCE "${CODEX_ANALOG_PATCHED_SOURCE}")
+  if(CODEX_ANALOG_PATCHED_SOURCE STREQUAL CODEX_ANALOG_ORIGINAL_SOURCE)
+    message(FATAL_ERROR "Audited analog loop was not found for patching")
+  endif()
+  set(CODEX_ANALOG_PATCHED_SOURCE_PATH "${CMAKE_CURRENT_BINARY_DIR}/codex_analog_input_2684f22.c")
+  file(WRITE "${CODEX_ANALOG_PATCHED_SOURCE_PATH}" "${CODEX_ANALOG_PATCHED_SOURCE}")
+  # zephyr_library() names a library from its directory relative to
+  # ZEPHYR_BASE. Derive the name from the audited module path instead of
+  # assuming where a consuming application places the module.
+  file(RELATIVE_PATH CODEX_ANALOG_TARGET_RELATIVE_PATH "${ZEPHYR_BASE}"
+       "${CODEX_ANALOG_UPSTREAM_DIR}")
+  string(REPLACE "/" "__" CODEX_ANALOG_UPSTREAM_TARGET
+         "${CODEX_ANALOG_TARGET_RELATIVE_PATH}")
+  string(REPLACE ":" "__" CODEX_ANALOG_UPSTREAM_TARGET
+         "${CODEX_ANALOG_UPSTREAM_TARGET}")
+  # The substitution runs deferred in APPLICATION_SOURCE_DIR; preserve its
+  # exact arguments beyond this module directory's CMake scope.
+  set(CODEX_ANALOG_OVERRIDE_TARGET "${CODEX_ANALOG_UPSTREAM_TARGET}"
+      CACHE INTERNAL "Audited analog library target")
+  set(CODEX_ANALOG_OVERRIDE_SOURCE "${CODEX_ANALOG_UPSTREAM_SOURCE}"
+      CACHE INTERNAL "Audited analog source")
+  set(CODEX_ANALOG_OVERRIDE_PATCHED_SOURCE "${CODEX_ANALOG_PATCHED_SOURCE_PATH}"
+      CACHE INTERNAL "Generated corrected analog source")
+  function(codex_replace_badjeff_analog_source)
+    if(NOT TARGET "${CODEX_ANALOG_OVERRIDE_TARGET}")
+      message(FATAL_ERROR "Pinned badjeff Zephyr library target is unavailable: ${CODEX_ANALOG_OVERRIDE_TARGET}")
+    endif()
+    get_target_property(CODEX_ANALOG_SOURCES "${CODEX_ANALOG_OVERRIDE_TARGET}" SOURCES)
+    # zephyr_library_sources_ifdef retains the path as written in the
+    # upstream CMakeLists (relative), while source inspection is absolute.
+    # Remove both representations and fail closed if the audited original
+    # still remains, so a build can never compile both implementations.
+    list(REMOVE_ITEM CODEX_ANALOG_SOURCES
+         "${CODEX_ANALOG_OVERRIDE_SOURCE}" "src/analog_input.c")
+    list(FIND CODEX_ANALOG_SOURCES "${CODEX_ANALOG_OVERRIDE_SOURCE}"
+         CODEX_ANALOG_ABSOLUTE_REMAINS)
+    list(FIND CODEX_ANALOG_SOURCES "src/analog_input.c"
+         CODEX_ANALOG_RELATIVE_REMAINS)
+    if(NOT CODEX_ANALOG_ABSOLUTE_REMAINS EQUAL -1 OR
+       NOT CODEX_ANALOG_RELATIVE_REMAINS EQUAL -1)
+      message(FATAL_ERROR "Failed to remove audited badjeff analog_input.c")
+    endif()
+    set_property(TARGET "${CODEX_ANALOG_OVERRIDE_TARGET}" PROPERTY SOURCES "${CODEX_ANALOG_SOURCES}")
+    target_sources("${CODEX_ANALOG_OVERRIDE_TARGET}" PRIVATE "${CODEX_ANALOG_OVERRIDE_PATCHED_SOURCE}")
+    if(DEFINED ZMK_SOURCE_DIR)
+      target_include_directories("${CODEX_ANALOG_OVERRIDE_TARGET}" PRIVATE
+        "${ZMK_SOURCE_DIR}/app/include")
+    endif()
+  endfunction()
+  cmake_language(DEFER DIRECTORY "${APPLICATION_SOURCE_DIR}" CALL codex_replace_badjeff_analog_source)
+endif()
+
 target_sources_ifdef(CONFIG_CODEX_REPORT_ROUTER codex_micro PRIVATE
   src/transport/report_router.c
 )

@@ -34,6 +34,7 @@ struct codex_analog_calibration_internal {
 enum codex_analog_item_type {
     CODEX_ANALOG_ITEM_RAW,
     CODEX_ANALOG_ITEM_RADIAL,
+    CODEX_ANALOG_ITEM_REFRESH,
 };
 
 struct codex_analog_item {
@@ -74,6 +75,8 @@ static struct codex_analog_state default_state = {
     },
 };
 static struct codex_analog_state *active_state = &default_state;
+static void refresh_work_handler(struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(refresh_work, refresh_work_handler);
 
 #if defined(CONFIG_ZTEST)
 static bool test_uptime_enabled;
@@ -228,7 +231,8 @@ static bool refresh_elapsed(uint32_t now, uint32_t previous, uint32_t interval)
     return (uint32_t)(now - previous) >= interval;
 }
 
-static void process_radial(struct codex_analog_state *state, struct codex_radial value)
+static void process_radial(struct codex_analog_state *state, struct codex_radial value,
+                           bool forced_refresh)
 {
     char json[CODEX_ANALOG_JSON_MAX];
     uint32_t now = analog_uptime_ms();
@@ -244,12 +248,13 @@ static void process_radial(struct codex_analog_state *state, struct codex_radial
         }
         state->center_sent = true;
         state->have_last_noncenter = false;
+        (void)k_work_cancel_delayable(&refresh_work);
         emit = true;
     } else {
         uint32_t threshold = state->calibration.meaningful_delta;
 
         state->center_sent = false;
-        emit = !state->have_last_noncenter ||
+        emit = forced_refresh || !state->have_last_noncenter ||
                radial_delta(value, state->last_noncenter) >=
                    (float)threshold / (float)CODEX_ANALOG_SCALE ||
                refresh_elapsed(now, state->last_emit_ms,
@@ -269,6 +274,10 @@ static void process_radial(struct codex_analog_state *state, struct codex_radial
     state->last_emit_ms = now;
     /* Like the key worker, each owned item is consumed even on router errors. */
     (void)codex_router_send_json(CODEX_CHANNEL_RPC, (const uint8_t *)json, (size_t)length);
+    if (value.distance > 0.0f) {
+        (void)k_work_reschedule(&refresh_work,
+                                K_MSEC(state->calibration.refresh_interval_ms));
+    }
 }
 
 static bool process_one(void)
@@ -279,10 +288,17 @@ static bool process_one(void)
     if (k_msgq_get(&analog_queue, &item, K_NO_WAIT) != 0) {
         return false;
     }
-    radial = item.type == CODEX_ANALOG_ITEM_RAW
-                 ? normalize_with(&active_state->calibration, item.value.raw.x, item.value.raw.y)
-                 : item.value.radial;
-    process_radial(active_state, radial);
+    if (item.type == CODEX_ANALOG_ITEM_RAW) {
+        radial = normalize_with(&active_state->calibration, item.value.raw.x, item.value.raw.y);
+    } else if (item.type == CODEX_ANALOG_ITEM_RADIAL) {
+        radial = item.value.radial;
+    } else {
+        if (!active_state->have_last_noncenter) {
+            return true;
+        }
+        radial = active_state->last_noncenter;
+    }
+    process_radial(active_state, radial, item.type == CODEX_ANALOG_ITEM_REFRESH);
     return true;
 }
 
@@ -294,6 +310,20 @@ static void analog_work_handler(struct k_work *work)
 }
 
 K_WORK_DEFINE(analog_work, analog_work_handler);
+
+static void refresh_work_handler(struct k_work *work)
+{
+    const struct codex_analog_item item = {.type = CODEX_ANALOG_ITEM_REFRESH};
+
+    ARG_UNUSED(work);
+    if (active_state->have_last_noncenter &&
+        k_msgq_put(&analog_queue, &item, K_NO_WAIT) == 0) {
+        (void)k_work_submit(&analog_work);
+    } else if (active_state->have_last_noncenter) {
+        (void)k_work_reschedule(&refresh_work,
+                                K_MSEC(active_state->calibration.refresh_interval_ms));
+    }
+}
 
 static int queue_item(const struct codex_analog_item *item)
 {
@@ -342,6 +372,18 @@ static int analog_input_event(struct codex_analog_state *state, const struct inp
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1,
              "Codex supports one analog-stick adapter");
+#define CODEX_SOURCE_AXIS_VALID(axis, code) \
+    DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), report_on_change_only) && \
+    DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), evt_type) == INPUT_EV_REL && \
+    DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), input_code) == code && \
+    DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), mv_mid) == 0 && \
+    DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), mv_deadzone) == 0 && \
+    DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), mv_min_max) == 0 && \
+    DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), scale_multiplier) == 1 && \
+    DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), scale_divisor) == 1 && \
+    !DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), invert)
+BUILD_ASSERT(CODEX_SOURCE_AXIS_VALID(x, INPUT_REL_X), "analog X source must pass absolute mV");
+BUILD_ASSERT(CODEX_SOURCE_AXIS_VALID(y, INPUT_REL_Y), "analog Y source must pass absolute mV");
 BUILD_ASSERT(DT_INST_PROP(0, max_x) > DT_INST_PROP(0, center_x),
              "codex,analog-stick max-x must exceed center-x");
 BUILD_ASSERT(DT_INST_PROP(0, max_y) > DT_INST_PROP(0, center_y),
@@ -375,6 +417,10 @@ static struct codex_analog_state dts_state = {
                                                 CONFIG_CODEX_ANALOG_REFRESH_INTERVAL_MS),
     },
     .input_device = DEVICE_DT_GET(DT_INST_PHANDLE(0, input_device)),
+    .latest_x = DT_INST_PROP(0, center_x),
+    .latest_y = DT_INST_PROP(0, center_y),
+    .have_x = true,
+    .have_y = true,
 };
 
 static void analog_input_callback(struct input_event *event)
@@ -389,6 +435,17 @@ INPUT_CALLBACK_DEFINE(DEVICE_DT_GET(DT_INST_PHANDLE(0, input_device)), analog_in
 #endif
 
 #if defined(CONFIG_ZTEST)
+static void reset_analog_state(struct codex_analog_state *state)
+{
+    state->latest_x = state->calibration.center_x;
+    state->latest_y = state->calibration.center_y;
+    state->have_x = true;
+    state->have_y = true;
+    state->have_last_noncenter = false;
+    state->center_sent = false;
+    state->last_emit_ms = 0U;
+}
+
 struct codex_radial codex_analog_normalize(int32_t raw_x, int32_t raw_y)
 {
     return normalize_with(&active_state->calibration, raw_x, raw_y);
@@ -422,6 +479,10 @@ int codex_analog_test_configure(const struct codex_analog_calibration *calibrati
         .meaningful_delta = calibration->meaningful_delta,
         .refresh_interval_ms = calibration->refresh_interval_ms,
     };
+    default_state.latest_x = calibration->center_x;
+    default_state.latest_y = calibration->center_y;
+    default_state.have_x = true;
+    default_state.have_y = true;
     active_state = &default_state;
     return 0;
 }
@@ -441,13 +502,11 @@ int codex_analog_test_input_event(uint16_t code, int32_t value, bool sync)
 void codex_analog_test_reset(void)
 {
     k_msgq_purge(&analog_queue);
-    default_state.latest_x = 0;
-    default_state.latest_y = 0;
-    default_state.have_x = false;
-    default_state.have_y = false;
-    default_state.have_last_noncenter = false;
-    default_state.center_sent = false;
-    default_state.last_emit_ms = 0U;
+    (void)k_work_cancel_delayable(&refresh_work);
+    reset_analog_state(&default_state);
+#if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
+    reset_analog_state(&dts_state);
+#endif
     active_state = &default_state;
     test_uptime_enabled = false;
 }

@@ -12,14 +12,22 @@ properties:
     type: phandle
     required: true
     description: zmk,analog-input device that produces the paired X/Y events.
+  source-x-channel:
+    type: phandle
+    required: true
+    description: zmk,analog-input X child that passes absolute millivolts unchanged.
+  source-y-channel:
+    type: phandle
+    required: true
+    description: zmk,analog-input Y child that passes absolute millivolts unchanged.
   center-x:
     type: int
     required: true
-    description: Raw X reading at rest.
+    description: Source-output millivolt reading at rest.
   center-y:
     type: int
     required: true
-    description: Raw Y reading at rest.
+    description: Source-output millivolt reading at rest.
   max-x:
     type: int
     required: true

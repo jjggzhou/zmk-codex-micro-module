@@ -4,7 +4,11 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/device.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/drivers/adc/adc_emul.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/input/input.h>
 #include <zephyr/ztest.h>
 
 #include <codex/input.h>
@@ -23,7 +27,7 @@ static void configure_default(void)
         .invert_x = false,
         .invert_y = false,
         .meaningful_delta = DT_PROP(DT_NODELABEL(codex_analog_test), meaningful_delta),
-        .refresh_interval_ms = DT_PROP(DT_NODELABEL(codex_analog_test), refresh_interval_ms),
+        .refresh_interval_ms = 20,
     };
 
     zassert_ok(codex_analog_test_configure(&calibration));
@@ -36,6 +40,12 @@ static void reset_analog(void *fixture)
     codex_analog_test_reset();
     configure_default();
     codex_analog_test_set_uptime(0U);
+}
+
+static void cleanup_analog(void *fixture)
+{
+    ARG_UNUSED(fixture);
+    codex_analog_test_reset();
 }
 
 ZTEST(analog, test_center_is_exact_zero)
@@ -109,21 +119,73 @@ ZTEST(analog, test_input_pair_waits_for_sync_and_uses_last_other_axis)
                          "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0,\"d\":0}}"), 0);
 }
 
-ZTEST(analog, test_small_delta_is_suppressed_refresh_and_center_are_not)
+ZTEST(analog, test_registered_callback_uses_center_for_first_pure_axis_and_filters_events)
+{
+    const struct device *source = DEVICE_DT_GET(DT_NODELABEL(analog_input_test));
+
+    zassert_ok(input_report(NULL, INPUT_EV_REL, INPUT_REL_X, 4095, true, K_NO_WAIT));
+    k_sleep(K_MSEC(2));
+    zassert_equal(codex_input_test_event_count(), 0U);
+    zassert_ok(input_report(source, INPUT_EV_KEY, INPUT_REL_X, 4095, true, K_NO_WAIT));
+    zassert_ok(input_report(source, INPUT_EV_REL, INPUT_REL_WHEEL, 4095, true, K_NO_WAIT));
+    k_sleep(K_MSEC(2));
+    zassert_equal(codex_input_test_event_count(), 0U);
+
+    zassert_ok(input_report(source, INPUT_EV_REL, INPUT_REL_X, 4095, true, K_NO_WAIT));
+    codex_input_test_wait_for_events(1U);
+    zassert_equal(strcmp(codex_input_test_event(0U),
+                         "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0,\"d\":1}}"), 0);
+}
+
+ZTEST(analog, test_registered_callback_first_pure_y_and_sync_boundary_use_cached_center)
+{
+    const struct device *source = DEVICE_DT_GET(DT_NODELABEL(analog_input_test));
+
+    zassert_ok(input_report(source, INPUT_EV_REL, INPUT_REL_Y, 4095, false, K_NO_WAIT));
+    k_sleep(K_MSEC(2));
+    zassert_equal(codex_input_test_event_count(), 0U);
+    zassert_ok(input_report(source, INPUT_EV_REL, INPUT_REL_Y, 4095, true, K_NO_WAIT));
+    codex_input_test_wait_for_events(1U);
+    zassert_equal(strcmp(codex_input_test_event(0U),
+                         "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0.25,\"d\":1}}"), 0);
+}
+
+ZTEST(analog, test_patched_upstream_driver_reports_changed_frame_then_returns_on_unchanged_frame)
+{
+    const struct device *adc = DEVICE_DT_GET(DT_NODELABEL(adc0));
+    const struct device *source = DEVICE_DT_GET(DT_NODELABEL(analog_input_test));
+
+    zassert_true(device_is_ready(adc));
+    zassert_true(device_is_ready(source));
+    /* The pinned driver initializes its ADC sequence asynchronously. */
+    k_sleep(K_MSEC(30));
+    zassert_ok(adc_emul_const_value_set(adc, 0U, 4095U));
+    zassert_ok(adc_emul_const_value_set(adc, 1U, 2048U));
+    zassert_ok(sensor_sample_fetch(source));
+    codex_input_test_wait_for_events(1U);
+
+    /* This invokes the patched reverse scan with every channel unchanged. */
+    zassert_ok(sensor_sample_fetch(source));
+    k_sleep(K_MSEC(2));
+    zassert_equal(codex_input_test_event_count(), 1U);
+}
+
+ZTEST(analog, test_held_position_refreshes_without_new_input_and_center_is_not_suppressed)
 {
     zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4095, false));
     zassert_ok(codex_analog_test_input_event(INPUT_REL_Y, 2048, true));
     codex_input_test_wait_for_events(1U);
+
+    /* No subsequent input arrives: the delayable work must refresh the hold. */
+    codex_input_test_wait_for_events(2U);
     zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4080, true));
-    k_sleep(K_MSEC(2));
-    zassert_equal(codex_input_test_event_count(), 1U);
 
     codex_analog_test_set_uptime(20U);
     zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4080, true));
-    codex_input_test_wait_for_events(2U);
-    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 2048, true));
     codex_input_test_wait_for_events(3U);
-    zassert_equal(strcmp(codex_input_test_event(2U),
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 2048, true));
+    codex_input_test_wait_for_events(4U);
+    zassert_equal(strcmp(codex_input_test_event(3U),
                          "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0,\"d\":0}}"), 0);
 }
 
@@ -194,4 +256,4 @@ ZTEST(analog, test_refresh_comparison_is_wrap_safe)
     codex_input_test_wait_for_events(2U);
 }
 
-ZTEST_SUITE(analog, NULL, NULL, reset_analog, NULL, NULL);
+ZTEST_SUITE(analog, NULL, NULL, reset_analog, cleanup_analog, NULL);

@@ -1,18 +1,52 @@
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+&adc0 {
+    ref-internal-mv = <3300>;
+};
+
 / {
-    analog_test_source: analog-test-source {
-        status = "disabled";
+    analog_input_test: analog-input-test {
+        compatible = "zmk,analog-input";
+        sampling-hz = <0>;
+
+        analog_test_x: x-channel {
+            io-channels = <&adc0 0>;
+            mv-mid = <0>;
+            mv-min-max = <0>;
+            mv-deadzone = <0>;
+            scale-multiplier = <1>;
+            scale-divisor = <1>;
+            report-on-change-only;
+            evt-type = <INPUT_EV_REL>;
+            input-code = <INPUT_REL_X>;
+        };
+
+        analog_test_y: y-channel {
+            io-channels = <&adc0 1>;
+            mv-mid = <0>;
+            mv-min-max = <0>;
+            mv-deadzone = <0>;
+            scale-multiplier = <1>;
+            scale-divisor = <1>;
+            report-on-change-only;
+            evt-type = <INPUT_EV_REL>;
+            input-code = <INPUT_REL_Y>;
+        };
     };
 
     codex_analog_test: codex-analog-test {
         compatible = "codex,analog-stick";
-        status = "disabled";
-        input-device = <&analog_test_source>;
+        input-device = <&analog_input_test>;
+        source-x-channel = <&analog_test_x>;
+        source-y-channel = <&analog_test_y>;
         center-x = <2048>;
         center-y = <2048>;
         max-x = <4095>;
         max-y = <4095>;
         dead-zone = <100>;
         meaningful-delta = <100>;
-        refresh-interval-ms = <20>;
+        /* Timer-specific tests use a short override and cancel it; keep the
+         * shared callback fixture from leaking a refresh into key tests. */
+        refresh-interval-ms = <1000>;
     };
 };

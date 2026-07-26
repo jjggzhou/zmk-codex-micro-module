@@ -1,5 +1,9 @@
 source "Kconfig.zephyr"
 
+# The test application adds the Codex module manually after Zephyr configures;
+# include its symbols now so the fixture exercises the production adapter.
+rsource "../../Kconfig"
+
 config ZMK_USB
     bool
     default y
