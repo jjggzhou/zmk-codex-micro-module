@@ -48,6 +48,16 @@ static void cleanup_analog(void *fixture)
     codex_analog_test_reset();
 }
 
+static bool wait_for_event_count(size_t count, uint32_t timeout_ms)
+{
+    int64_t deadline = k_uptime_get() + timeout_ms;
+
+    while (codex_input_test_event_count() < count && k_uptime_get() < deadline) {
+        k_sleep(K_MSEC(1));
+    }
+    return codex_input_test_event_count() == count;
+}
+
 ZTEST(analog, test_center_is_exact_zero)
 {
     struct codex_radial value = codex_analog_normalize(2048, 2048);
@@ -187,6 +197,63 @@ ZTEST(analog, test_held_position_refreshes_without_new_input_and_center_is_not_s
     codex_input_test_wait_for_events(4U);
     zassert_equal(strcmp(codex_input_test_event(3U),
                          "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0,\"d\":0}}"), 0);
+}
+
+ZTEST(analog, test_suppressed_sample_inherits_armed_refresh_without_moving_deadline)
+{
+    const struct codex_analog_calibration calibration = {
+        .center_x = 2048,
+        .center_y = 2048,
+        .max_x = 4095,
+        .max_y = 4095,
+        .dead_zone = 100,
+        .meaningful_delta = 200,
+        .refresh_interval_ms = 100,
+    };
+
+    zassert_ok(codex_analog_test_configure(&calibration));
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.2f, .distance = 0.5f}));
+    codex_input_test_wait_for_events(1U);
+
+    k_sleep(K_MSEC(60));
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.2f, .distance = 0.505f}));
+    zassert_true(wait_for_event_count(2U, 70U));
+    zassert_equal(strcmp(codex_input_test_event(1U),
+                         "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0.2,\"d\":0.505}}"), 0);
+
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.0f, .distance = 0.0f}));
+    codex_input_test_wait_for_events(3U);
+    k_sleep(K_MSEC(120));
+    zassert_equal(codex_input_test_event_count(), 3U);
+}
+
+ZTEST(analog, test_suppressed_sample_after_inflight_emit_arms_latest_refresh)
+{
+    const struct codex_analog_calibration calibration = {
+        .center_x = 2048,
+        .center_y = 2048,
+        .max_x = 4095,
+        .max_y = 4095,
+        .dead_zone = 100,
+        .meaningful_delta = 200,
+        .refresh_interval_ms = 40,
+    };
+
+    zassert_ok(codex_analog_test_configure(&calibration));
+    codex_input_test_set_block_router(true);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.2f, .distance = 0.5f}));
+    zassert_ok(codex_input_test_wait_router_entered());
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.2f, .distance = 0.505f}));
+    codex_input_test_release_router();
+    codex_input_test_set_block_router(false);
+
+    zassert_true(wait_for_event_count(2U, 80U));
+    zassert_equal(strcmp(codex_input_test_event(1U),
+                         "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0.2,\"d\":0.505}}"), 0);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.0f, .distance = 0.0f}));
+    codex_input_test_wait_for_events(3U);
+    k_sleep(K_MSEC(60));
+    zassert_equal(codex_input_test_event_count(), 3U);
 }
 
 ZTEST(analog, test_center_is_emitted_once_and_can_be_emitted_again)

@@ -71,6 +71,8 @@ static struct codex_analog_item analog_mailbox;
 static atomic_t analog_mailbox_pending;
 static uint32_t analog_generation;
 static uint32_t refresh_generation;
+static struct codex_radial refresh_value;
+static bool refresh_work_armed;
 
 static struct codex_analog_state default_state = {
     .calibration = {
@@ -256,23 +258,37 @@ static void invalidate_refresh(void)
     k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
 
     refresh_generation = 0U;
+    refresh_work_armed = false;
     k_spin_unlock(&analog_mailbox_lock, key);
     (void)k_work_cancel_delayable(&refresh_work);
 }
 
-static void arm_refresh_if_current(uint32_t generation)
+static void maintain_refresh_if_current(struct codex_analog_state *state,
+                                        struct codex_radial value, uint32_t generation,
+                                        uint32_t now, bool emitted)
 {
-    bool arm = false;
+    uint32_t delay_ms = state->calibration.refresh_interval_ms;
+    bool reschedule = false;
     k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
 
     if (generation == analog_generation) {
         refresh_generation = generation;
-        arm = true;
+        refresh_value = value;
+        if (emitted || !refresh_work_armed) {
+            if (!emitted) {
+                uint32_t elapsed = now - state->last_emit_ms;
+
+                delay_ms = elapsed >= state->calibration.refresh_interval_ms
+                               ? 0U
+                               : state->calibration.refresh_interval_ms - elapsed;
+            }
+            refresh_work_armed = true;
+            reschedule = true;
+        }
     }
     k_spin_unlock(&analog_mailbox_lock, key);
-    if (arm) {
-        (void)k_work_reschedule(&refresh_work,
-                                K_MSEC(active_state->calibration.refresh_interval_ms));
+    if (reschedule) {
+        (void)k_work_reschedule(&refresh_work, K_MSEC(delay_ms));
     }
 }
 
@@ -313,6 +329,7 @@ static void process_radial(struct codex_analog_state *state, struct codex_radial
         }
     }
     if (!emit) {
+        maintain_refresh_if_current(state, value, generation, now, false);
         return;
     }
     length = format_radial_json(json, value);
@@ -323,7 +340,7 @@ static void process_radial(struct codex_analog_state *state, struct codex_radial
     /* Like the key worker, each owned item is consumed even on router errors. */
     (void)codex_router_send_json(CODEX_CHANNEL_RPC, (const uint8_t *)json, (size_t)length);
     if (value.distance > 0.0f) {
-        arm_refresh_if_current(generation);
+        maintain_refresh_if_current(state, value, generation, now, true);
     }
 }
 
@@ -367,10 +384,11 @@ static void refresh_work_handler(struct k_work *work)
 
     ARG_UNUSED(work);
     key = k_spin_lock(&analog_mailbox_lock);
-    if (active_state->have_last_noncenter && refresh_generation != 0U &&
-        refresh_generation == analog_generation && !atomic_get(&analog_mailbox_pending)) {
+    refresh_work_armed = false;
+    if (refresh_generation != 0U && refresh_generation == analog_generation &&
+        !atomic_get(&analog_mailbox_pending)) {
         item.generation = refresh_generation;
-        item.value.radial = active_state->last_noncenter;
+        item.value.radial = refresh_value;
         analog_mailbox = item;
         atomic_set(&analog_mailbox_pending, 1);
         submit = true;
@@ -389,6 +407,7 @@ static void publish_item(struct codex_analog_item item)
         /* Drop every old refresh owner before reusing a generation value. */
         analog_generation = 1U;
         refresh_generation = 0U;
+        refresh_work_armed = false;
     } else {
         analog_generation++;
     }
@@ -592,6 +611,8 @@ void codex_analog_test_reset(void)
     atomic_clear(&analog_mailbox_pending);
     analog_generation = 0U;
     refresh_generation = 0U;
+    refresh_value = (struct codex_radial){0};
+    refresh_work_armed = false;
     k_spin_unlock(&analog_mailbox_lock, key);
     (void)k_work_cancel_delayable(&refresh_work);
     reset_analog_state(&default_state);
