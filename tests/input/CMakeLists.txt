@@ -20,8 +20,10 @@ list(APPEND DTS_ROOT
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(codex_input)
 
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../..
-  ${CMAKE_CURRENT_BINARY_DIR}/codex_micro_module)
+if(NOT TARGET codex_micro)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../..
+    ${CMAKE_CURRENT_BINARY_DIR}/codex_micro_module)
+endif()
 
 execute_process(
   COMMAND west list zmk -f {abspath}

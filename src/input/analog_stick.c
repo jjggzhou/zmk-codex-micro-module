@@ -41,6 +41,7 @@ enum codex_analog_item_type {
 
 struct codex_analog_item {
     enum codex_analog_item_type type;
+    uint32_t generation;
     union {
         struct {
             int32_t x;
@@ -63,13 +64,13 @@ struct codex_analog_state {
     uint32_t last_emit_ms;
 };
 
-K_MSGQ_DEFINE(analog_queue, sizeof(struct codex_analog_item),
-              CONFIG_CODEX_ANALOG_QUEUE_DEPTH, 4);
-/* Sampled analog state is latest-wins: intermediate producer frames may be
- * coalesced, but a final center cannot be lost behind a blocked worker. */
+/* All analog producers share this latest-wins mailbox. Intermediate samples
+ * may coalesce, but source and public samples cannot overtake one another. */
 static struct k_spinlock analog_mailbox_lock;
 static struct codex_analog_item analog_mailbox;
 static atomic_t analog_mailbox_pending;
+static uint32_t analog_generation;
+static uint32_t refresh_generation;
 
 static struct codex_analog_state default_state = {
     .calibration = {
@@ -82,7 +83,9 @@ static struct codex_analog_state default_state = {
     },
 };
 static struct codex_analog_state *active_state = &default_state;
+static void analog_work_handler(struct k_work *work);
 static void refresh_work_handler(struct k_work *work);
+K_WORK_DEFINE(analog_work, analog_work_handler);
 K_WORK_DELAYABLE_DEFINE(refresh_work, refresh_work_handler);
 
 #if defined(CONFIG_ZTEST)
@@ -238,8 +241,43 @@ static bool refresh_elapsed(uint32_t now, uint32_t previous, uint32_t interval)
     return (uint32_t)(now - previous) >= interval;
 }
 
+static bool generation_is_current(uint32_t generation)
+{
+    bool current;
+    k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
+
+    current = generation == analog_generation;
+    k_spin_unlock(&analog_mailbox_lock, key);
+    return current;
+}
+
+static void invalidate_refresh(void)
+{
+    k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
+
+    refresh_generation = 0U;
+    k_spin_unlock(&analog_mailbox_lock, key);
+    (void)k_work_cancel_delayable(&refresh_work);
+}
+
+static void arm_refresh_if_current(uint32_t generation)
+{
+    bool arm = false;
+    k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
+
+    if (generation == analog_generation) {
+        refresh_generation = generation;
+        arm = true;
+    }
+    k_spin_unlock(&analog_mailbox_lock, key);
+    if (arm) {
+        (void)k_work_reschedule(&refresh_work,
+                                K_MSEC(active_state->calibration.refresh_interval_ms));
+    }
+}
+
 static void process_radial(struct codex_analog_state *state, struct codex_radial value,
-                           bool forced_refresh)
+                           uint32_t generation, bool forced_refresh)
 {
     char json[CODEX_ANALOG_JSON_MAX];
     uint32_t now = analog_uptime_ms();
@@ -249,13 +287,16 @@ static void process_radial(struct codex_analog_state *state, struct codex_radial
     if (!radial_is_valid(value)) {
         return;
     }
+    if (forced_refresh && !generation_is_current(generation)) {
+        return;
+    }
     if (value.distance == 0.0f) {
         if (state->center_sent) {
             return;
         }
         state->center_sent = true;
         state->have_last_noncenter = false;
-        (void)k_work_cancel_delayable(&refresh_work);
+        invalidate_refresh();
         emit = true;
     } else {
         uint32_t threshold = state->calibration.meaningful_delta;
@@ -282,36 +323,14 @@ static void process_radial(struct codex_analog_state *state, struct codex_radial
     /* Like the key worker, each owned item is consumed even on router errors. */
     (void)codex_router_send_json(CODEX_CHANNEL_RPC, (const uint8_t *)json, (size_t)length);
     if (value.distance > 0.0f) {
-        (void)k_work_reschedule(&refresh_work,
-                                K_MSEC(state->calibration.refresh_interval_ms));
+        arm_refresh_if_current(generation);
     }
-}
-
-static bool process_one(void)
-{
-    struct codex_analog_item item;
-    struct codex_radial radial;
-
-    if (k_msgq_get(&analog_queue, &item, K_NO_WAIT) != 0) {
-        return false;
-    }
-    if (item.type == CODEX_ANALOG_ITEM_RAW) {
-        radial = normalize_with(&active_state->calibration, item.value.raw.x, item.value.raw.y);
-    } else if (item.type == CODEX_ANALOG_ITEM_RADIAL) {
-        radial = item.value.radial;
-    } else {
-        if (!active_state->have_last_noncenter) {
-            return true;
-        }
-        radial = active_state->last_noncenter;
-    }
-    process_radial(active_state, radial, item.type == CODEX_ANALOG_ITEM_REFRESH);
-    return true;
 }
 
 static bool process_mailbox(void)
 {
     struct codex_analog_item item;
+    struct codex_radial radial;
     k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
 
     if (!atomic_get(&analog_mailbox_pending)) {
@@ -321,44 +340,63 @@ static bool process_mailbox(void)
     item = analog_mailbox;
     atomic_clear(&analog_mailbox_pending);
     k_spin_unlock(&analog_mailbox_lock, key);
-    process_radial(active_state,
-                   normalize_with(&active_state->calibration, item.value.raw.x, item.value.raw.y),
-                   false);
+    if (item.type == CODEX_ANALOG_ITEM_RAW) {
+        radial = normalize_with(&active_state->calibration, item.value.raw.x, item.value.raw.y);
+    } else if (item.type == CODEX_ANALOG_ITEM_RADIAL) {
+        radial = item.value.radial;
+    } else {
+        radial = item.value.radial;
+    }
+    process_radial(active_state, radial, item.generation,
+                   item.type == CODEX_ANALOG_ITEM_REFRESH);
     return true;
 }
 
 static void analog_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-    while (process_one()) {
-    }
     while (process_mailbox()) {
     }
 }
 
-K_WORK_DEFINE(analog_work, analog_work_handler);
-
 static void refresh_work_handler(struct k_work *work)
 {
-    const struct codex_analog_item item = {.type = CODEX_ANALOG_ITEM_REFRESH};
+    struct codex_analog_item item = {.type = CODEX_ANALOG_ITEM_REFRESH};
+    bool submit = false;
+    k_spinlock_key_t key;
 
     ARG_UNUSED(work);
-    if (active_state->have_last_noncenter &&
-        k_msgq_put(&analog_queue, &item, K_NO_WAIT) == 0) {
+    key = k_spin_lock(&analog_mailbox_lock);
+    if (active_state->have_last_noncenter && refresh_generation != 0U &&
+        refresh_generation == analog_generation && !atomic_get(&analog_mailbox_pending)) {
+        item.generation = refresh_generation;
+        item.value.radial = active_state->last_noncenter;
+        analog_mailbox = item;
+        atomic_set(&analog_mailbox_pending, 1);
+        submit = true;
+    }
+    k_spin_unlock(&analog_mailbox_lock, key);
+    if (submit) {
         (void)k_work_submit(&analog_work);
-    } else if (active_state->have_last_noncenter) {
-        (void)k_work_reschedule(&refresh_work,
-                                K_MSEC(active_state->calibration.refresh_interval_ms));
     }
 }
 
-static int queue_item(const struct codex_analog_item *item)
+static void publish_item(struct codex_analog_item item)
 {
-    if (k_msgq_put(&analog_queue, item, K_NO_WAIT) != 0) {
-        return -ENOSPC;
+    k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
+
+    if (analog_generation == UINT32_MAX) {
+        /* Drop every old refresh owner before reusing a generation value. */
+        analog_generation = 1U;
+        refresh_generation = 0U;
+    } else {
+        analog_generation++;
     }
+    item.generation = analog_generation;
+    analog_mailbox = item;
+    atomic_set(&analog_mailbox_pending, 1);
+    k_spin_unlock(&analog_mailbox_lock, key);
     (void)k_work_submit(&analog_work);
-    return 0;
 }
 
 int codex_input_radial_emit(struct codex_radial value)
@@ -368,7 +406,11 @@ int codex_input_radial_emit(struct codex_radial value)
         .value.radial = value,
     };
 
-    return radial_is_valid(value) ? queue_item(&item) : -EINVAL;
+    if (!radial_is_valid(value)) {
+        return -EINVAL;
+    }
+    publish_item(item);
+    return 0;
 }
 
 static int analog_input_event(struct codex_analog_state *state, const struct input_event *event)
@@ -393,11 +435,7 @@ static int analog_input_event(struct codex_analog_state *state, const struct inp
         .type = CODEX_ANALOG_ITEM_RAW,
         .value.raw = {.x = state->latest_x, .y = state->latest_y},
     };
-    k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
-    analog_mailbox = item;
-    atomic_set(&analog_mailbox_pending, 1);
-    k_spin_unlock(&analog_mailbox_lock, key);
-    (void)k_work_submit(&analog_work);
+    publish_item(item);
     return 0;
 }
 
@@ -414,6 +452,8 @@ BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1,
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), scale_multiplier) == 1 && \
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), scale_divisor) == 1 && \
     !DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), invert)
+#define CODEX_COUNT_CHILD(node_id) + 1
+#define CODEX_CHILD_COUNT(node_id) (0 DT_FOREACH_CHILD(node_id, CODEX_COUNT_CHILD))
 BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_INST_PHANDLE(0, input_device), zmk_analog_input),
              "analog input-device must be zmk,analog-input");
 BUILD_ASSERT(DT_SAME_NODE(DT_PARENT(DT_INST_PHANDLE(0, source_x_channel)),
@@ -421,6 +461,8 @@ BUILD_ASSERT(DT_SAME_NODE(DT_PARENT(DT_INST_PHANDLE(0, source_x_channel)),
                  DT_SAME_NODE(DT_PARENT(DT_INST_PHANDLE(0, source_y_channel)),
                               DT_INST_PHANDLE(0, input_device)),
              "analog source channels must be children of input-device");
+BUILD_ASSERT(CODEX_CHILD_COUNT(DT_INST_PHANDLE(0, input_device)) == 2,
+             "analog input-device must have exactly source-x-channel and source-y-channel children");
 BUILD_ASSERT(CODEX_SOURCE_AXIS_TRANSPARENT(x, INPUT_REL_X),
              "analog X source must pass absolute mV");
 BUILD_ASSERT(CODEX_SOURCE_AXIS_TRANSPARENT(y, INPUT_REL_Y),
@@ -548,8 +590,9 @@ void codex_analog_test_reset(void)
     k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
 
     atomic_clear(&analog_mailbox_pending);
+    analog_generation = 0U;
+    refresh_generation = 0U;
     k_spin_unlock(&analog_mailbox_lock, key);
-    k_msgq_purge(&analog_queue);
     (void)k_work_cancel_delayable(&refresh_work);
     reset_analog_state(&default_state);
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)

@@ -212,7 +212,7 @@ ZTEST(analog, test_invalid_radial_values_are_rejected)
                   -EINVAL);
 }
 
-ZTEST(analog, test_queue_full_and_router_error_do_not_stop_worker)
+ZTEST(analog, test_latest_mailbox_handles_pressure_and_router_error)
 {
     const struct codex_analog_calibration calibration = {
         .center_x = 2048,
@@ -232,18 +232,64 @@ ZTEST(analog, test_queue_full_and_router_error_do_not_stop_worker)
         zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.1f + (float)i / 100.0f,
                                                                     .distance = 0.5f}));
     }
-    zassert_equal(codex_input_radial_emit((struct codex_radial){.angle = 0.9f, .distance = 0.5f}),
-                  -ENOSPC);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.9f, .distance = 0.5f}));
     codex_input_test_release_router();
     codex_input_test_set_block_router(false);
-    codex_input_test_wait_for_events(CONFIG_CODEX_ANALOG_QUEUE_DEPTH + 1U);
+    codex_input_test_wait_for_events(2U);
+    zassert_true(strstr(codex_input_test_event(1U), "\"a\":0.9") != NULL);
 
     codex_input_test_set_router_result(-ENOMSG);
     zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.3f, .distance = 0.5f}));
-    codex_input_test_wait_for_events(CONFIG_CODEX_ANALOG_QUEUE_DEPTH + 2U);
+    codex_input_test_wait_for_events(3U);
     codex_input_test_set_router_result(0);
     zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.4f, .distance = 0.5f}));
-    codex_input_test_wait_for_events(CONFIG_CODEX_ANALOG_QUEUE_DEPTH + 3U);
+    codex_input_test_wait_for_events(4U);
+}
+
+ZTEST(analog, test_later_public_center_overwrites_older_raw_pending_sample)
+{
+    codex_input_test_set_block_router(true);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.1f, .distance = 0.8f}));
+    zassert_ok(codex_input_test_wait_router_entered());
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4095, true));
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.0f, .distance = 0.0f}));
+    codex_input_test_release_router();
+    codex_input_test_set_block_router(false);
+    codex_input_test_wait_for_events(2U);
+    zassert_equal(strcmp(codex_input_test_event(1U),
+                         "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0,\"d\":0}}"), 0);
+    k_sleep(K_MSEC(40));
+    zassert_equal(codex_input_test_event_count(), 2U);
+}
+
+ZTEST(analog, test_later_public_noncenter_overwrites_older_raw_and_refreshes)
+{
+    codex_input_test_set_block_router(true);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.1f, .distance = 0.8f}));
+    zassert_ok(codex_input_test_wait_router_entered());
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4095, true));
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.25f, .distance = 0.6f}));
+    codex_input_test_release_router();
+    codex_input_test_set_block_router(false);
+    codex_input_test_wait_for_events(2U);
+    zassert_true(strstr(codex_input_test_event(1U), "\"a\":0.25,\"d\":0.6") != NULL);
+    codex_input_test_wait_for_events(3U);
+    zassert_true(strstr(codex_input_test_event(2U), "\"a\":0.25,\"d\":0.6") != NULL);
+}
+
+ZTEST(analog, test_later_raw_overwrites_older_public_pending_sample)
+{
+    codex_input_test_set_block_router(true);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.1f, .distance = 0.8f}));
+    zassert_ok(codex_input_test_wait_router_entered());
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.25f, .distance = 0.6f}));
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4095, true));
+    codex_input_test_release_router();
+    codex_input_test_set_block_router(false);
+    codex_input_test_wait_for_events(2U);
+    zassert_true(strstr(codex_input_test_event(1U), "\"a\":0,\"d\":1") != NULL);
+    codex_input_test_wait_for_events(3U);
+    zassert_true(strstr(codex_input_test_event(2U), "\"a\":0,\"d\":1") != NULL);
 }
 
 ZTEST(analog, test_blocked_worker_coalesces_final_center_and_cancels_stale_refresh)

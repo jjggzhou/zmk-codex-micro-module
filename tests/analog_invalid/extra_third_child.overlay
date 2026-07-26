@@ -1,0 +1,14 @@
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+    producer: analog-input { compatible = "zmk,analog-input"; sampling-hz = <0>;
+        producer_x: x { io-channels = <&adc0 0>; mv-mid=<0>; mv-min-max=<0>; mv-deadzone=<0>; scale-multiplier=<1>; scale-divisor=<1>; report-on-change-only; evt-type=<INPUT_EV_REL>; input-code=<INPUT_REL_X>; };
+        producer_y: y { io-channels = <&adc0 1>; mv-mid=<0>; mv-min-max=<0>; mv-deadzone=<0>; scale-multiplier=<1>; scale-divisor=<1>; report-on-change-only; evt-type=<INPUT_EV_REL>; input-code=<INPUT_REL_Y>; };
+        producer_z: z { io-channels = <&adc0 2>; mv-mid=<0>; mv-min-max=<0>; mv-deadzone=<0>; scale-multiplier=<1>; scale-divisor=<1>; report-on-change-only; evt-type=<INPUT_EV_REL>; input-code=<INPUT_REL_Z>; };
+    };
+    codex_analog_invalid: codex-analog-invalid {
+        compatible = "codex,analog-stick"; input-device = <&producer>;
+        source-x-channel = <&producer_x>; source-y-channel = <&producer_y>;
+        center-x=<2048>; center-y=<2048>; max-x=<4095>; max-y=<4095>; dead-zone=<100>; meaningful-delta=<100>; refresh-interval-ms=<20>;
+    };
+};
