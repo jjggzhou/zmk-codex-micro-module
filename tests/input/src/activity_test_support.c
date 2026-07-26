@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stddef.h>
 
 #include <zephyr/logging/log.h>
@@ -20,6 +21,20 @@ const struct zmk_event_type zmk_event_zmk_sensor_event = {
 };
 
 static size_t activity_state_event_count;
+static size_t activity_note_call_count;
+static size_t activity_note_failures_remaining;
+
+extern int __real_codex_zmk_activity_note(void);
+
+int __wrap_codex_zmk_activity_note(void)
+{
+    activity_note_call_count++;
+    if (activity_note_failures_remaining > 0U) {
+        activity_note_failures_remaining--;
+        return -EIO;
+    }
+    return __real_codex_zmk_activity_note();
+}
 
 int raise_zmk_activity_state_changed(struct zmk_activity_state_changed event)
 {
@@ -31,9 +46,21 @@ int raise_zmk_activity_state_changed(struct zmk_activity_state_changed event)
 void codex_activity_test_reset_events(void)
 {
     activity_state_event_count = 0U;
+    activity_note_call_count = 0U;
+    activity_note_failures_remaining = 0U;
 }
 
 size_t codex_activity_test_event_count(void)
 {
     return activity_state_event_count;
+}
+
+void codex_activity_test_fail_next_notes(size_t count)
+{
+    activity_note_failures_remaining = count;
+}
+
+size_t codex_activity_test_note_call_count(void)
+{
+    return activity_note_call_count;
 }

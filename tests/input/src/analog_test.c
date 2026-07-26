@@ -400,6 +400,53 @@ ZTEST(analog, test_later_public_center_overwrites_older_raw_pending_sample)
     zassert_equal(codex_input_test_event_count(), 2U);
 }
 
+ZTEST(analog, test_blocked_worker_out_and_back_keeps_meaningful_activity_latched)
+{
+    enter_idle_and_reset_activity_events();
+
+    /* Public radial input blocks the sole worker but is not physical activity. */
+    codex_input_test_set_block_router(true);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.1f, .distance = 0.8f}));
+    zassert_ok(codex_input_test_wait_router_entered());
+
+    /* A qualifying complete raw sample is immediately overwritten by center
+     * in the latest-wins RPC mailbox before the worker can consume either. */
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4095, true));
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 2048, true));
+
+    codex_input_test_release_router();
+    codex_input_test_set_block_router(false);
+    codex_input_test_wait_for_events(2U);
+    zassert_equal(strcmp(codex_input_test_event(1U),
+                         "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0,\"d\":0}}"), 0);
+    zassert_true(wait_for_activity_state(ZMK_ACTIVITY_ACTIVE, 20U));
+    zassert_equal(codex_activity_test_event_count(), 1U);
+}
+
+ZTEST(analog, test_failed_activity_note_is_requeued_without_sticking_latch)
+{
+    uint32_t invocation_count;
+
+    enter_idle_and_reset_activity_events();
+    codex_activity_test_fail_next_notes(1U);
+    invocation_count = codex_analog_test_work_invocation_count();
+
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4095, true));
+    zassert_true(wait_for_activity_state(ZMK_ACTIVITY_ACTIVE, 20U));
+    zassert_equal(codex_activity_test_note_call_count(), 2U);
+    zassert_true(codex_analog_test_work_invocation_count() >= invocation_count + 2U,
+                 "failed activity note was not retried in a later work invocation");
+    zassert_equal(codex_activity_test_event_count(), 1U);
+
+    /* A later sub-threshold sample cannot reveal a stale pending latch. */
+    zassert_ok(set_state(ZMK_ACTIVITY_IDLE));
+    codex_activity_test_reset_events();
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 2049, true));
+    k_sleep(K_MSEC(5));
+    zassert_equal(zmk_activity_get_state(), ZMK_ACTIVITY_IDLE);
+    zassert_equal(codex_activity_test_note_call_count(), 0U);
+}
+
 ZTEST(analog, test_later_public_noncenter_overwrites_older_raw_and_refreshes)
 {
     codex_input_test_set_block_router(true);

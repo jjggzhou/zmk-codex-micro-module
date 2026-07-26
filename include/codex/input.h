@@ -33,6 +33,7 @@ int codex_analog_test_configure(const struct codex_analog_calibration *calibrati
 int codex_analog_test_input_event(uint16_t code, int32_t value, bool sync);
 void codex_analog_test_reset(void);
 void codex_analog_test_set_uptime(uint32_t uptime_ms);
+uint32_t codex_analog_test_work_invocation_count(void);
 #endif
 
 #if defined(CONFIG_ZTEST)

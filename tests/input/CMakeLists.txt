@@ -58,6 +58,7 @@ target_sources(app PRIVATE
 )
 
 zephyr_ld_options(
+  -Wl,--wrap=codex_zmk_activity_note
   -Wl,--wrap=zmk_keymap_highest_layer_active
   -Wl,--wrap=zmk_keymap_layer_index_to_id
   -Wl,--wrap=zmk_keymap_layer_active

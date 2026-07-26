@@ -71,6 +71,7 @@ struct codex_analog_state {
 static struct k_spinlock analog_mailbox_lock;
 static struct codex_analog_item analog_mailbox;
 static atomic_t analog_mailbox_pending;
+static atomic_t analog_activity_pending;
 static uint32_t analog_generation;
 static uint32_t refresh_generation;
 static struct codex_radial refresh_value;
@@ -95,6 +96,7 @@ K_WORK_DELAYABLE_DEFINE(refresh_work, refresh_work_handler);
 #if defined(CONFIG_ZTEST)
 static bool test_uptime_enabled;
 static uint32_t test_uptime_ms;
+static atomic_t test_work_invocation_count;
 #endif
 
 static uint32_t analog_uptime_ms(void)
@@ -361,9 +363,6 @@ static bool process_mailbox(void)
     k_spin_unlock(&analog_mailbox_lock, key);
     if (item.type == CODEX_ANALOG_ITEM_RAW) {
         radial = normalize_with(&active_state->calibration, item.value.raw.x, item.value.raw.y);
-        if (radial.distance > CODEX_ANALOG_ACTIVITY_DISTANCE) {
-            (void)codex_zmk_activity_note();
-        }
     } else if (item.type == CODEX_ANALOG_ITEM_RADIAL) {
         radial = item.value.radial;
     } else {
@@ -374,10 +373,40 @@ static bool process_mailbox(void)
     return true;
 }
 
+static int process_pending_activity(void)
+{
+    int result;
+
+    if (!atomic_cas(&analog_activity_pending, 1, 0)) {
+        return 0;
+    }
+    result = codex_zmk_activity_note();
+    if (result < 0) {
+        /* A concurrent producer may already have set this bit again. */
+        atomic_set(&analog_activity_pending, 1);
+    }
+    return result < 0 ? result : 1;
+}
+
 static void analog_work_handler(struct k_work *work)
 {
+    bool retry_activity = false;
+
     ARG_UNUSED(work);
-    while (process_mailbox()) {
+#if defined(CONFIG_ZTEST)
+    atomic_inc(&test_work_invocation_count);
+#endif
+    while (true) {
+        if (!retry_activity && process_pending_activity() < 0) {
+            retry_activity = true;
+        }
+        if (!process_mailbox()) {
+            break;
+        }
+    }
+    if (retry_activity) {
+        /* Pinned Zephyr queues a running work item for one non-reentrant retry. */
+        (void)k_work_submit(&analog_work);
     }
 }
 
@@ -440,6 +469,7 @@ int codex_input_radial_emit(struct codex_radial value)
 static int analog_input_event(struct codex_analog_state *state, const struct input_event *event)
 {
     struct codex_analog_item item;
+    struct codex_radial radial;
 
     if (event->type != INPUT_EV_REL ||
         (event->code != INPUT_REL_X && event->code != INPUT_REL_Y)) {
@@ -459,6 +489,10 @@ static int analog_input_event(struct codex_analog_state *state, const struct inp
         .type = CODEX_ANALOG_ITEM_RAW,
         .value.raw = {.x = state->latest_x, .y = state->latest_y},
     };
+    radial = normalize_with(&state->calibration, item.value.raw.x, item.value.raw.y);
+    if (radial.distance > CODEX_ANALOG_ACTIVITY_DISTANCE) {
+        atomic_set(&analog_activity_pending, 1);
+    }
     publish_item(item);
     return 0;
 }
@@ -614,6 +648,7 @@ void codex_analog_test_reset(void)
     k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
 
     atomic_clear(&analog_mailbox_pending);
+    atomic_clear(&analog_activity_pending);
     analog_generation = 0U;
     refresh_generation = 0U;
     refresh_value = (struct codex_radial){0};
@@ -626,11 +661,17 @@ void codex_analog_test_reset(void)
 #endif
     active_state = &default_state;
     test_uptime_enabled = false;
+    atomic_clear(&test_work_invocation_count);
 }
 
 void codex_analog_test_set_uptime(uint32_t uptime_ms)
 {
     test_uptime_enabled = true;
     test_uptime_ms = uptime_ms;
+}
+
+uint32_t codex_analog_test_work_invocation_count(void)
+{
+    return (uint32_t)atomic_get(&test_work_invocation_count);
 }
 #endif
