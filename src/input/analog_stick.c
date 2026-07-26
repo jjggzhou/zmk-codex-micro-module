@@ -13,6 +13,8 @@
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
+#include <zephyr/spinlock.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #define CODEX_ANALOG_JSON_MAX 64U
@@ -63,6 +65,11 @@ struct codex_analog_state {
 
 K_MSGQ_DEFINE(analog_queue, sizeof(struct codex_analog_item),
               CONFIG_CODEX_ANALOG_QUEUE_DEPTH, 4);
+/* Sampled analog state is latest-wins: intermediate producer frames may be
+ * coalesced, but a final center cannot be lost behind a blocked worker. */
+static struct k_spinlock analog_mailbox_lock;
+static struct codex_analog_item analog_mailbox;
+static atomic_t analog_mailbox_pending;
 
 static struct codex_analog_state default_state = {
     .calibration = {
@@ -302,10 +309,30 @@ static bool process_one(void)
     return true;
 }
 
+static bool process_mailbox(void)
+{
+    struct codex_analog_item item;
+    k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
+
+    if (!atomic_get(&analog_mailbox_pending)) {
+        k_spin_unlock(&analog_mailbox_lock, key);
+        return false;
+    }
+    item = analog_mailbox;
+    atomic_clear(&analog_mailbox_pending);
+    k_spin_unlock(&analog_mailbox_lock, key);
+    process_radial(active_state,
+                   normalize_with(&active_state->calibration, item.value.raw.x, item.value.raw.y),
+                   false);
+    return true;
+}
+
 static void analog_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
     while (process_one()) {
+    }
+    while (process_mailbox()) {
     }
 }
 
@@ -366,13 +393,21 @@ static int analog_input_event(struct codex_analog_state *state, const struct inp
         .type = CODEX_ANALOG_ITEM_RAW,
         .value.raw = {.x = state->latest_x, .y = state->latest_y},
     };
-    return queue_item(&item);
+    k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
+    analog_mailbox = item;
+    atomic_set(&analog_mailbox_pending, 1);
+    k_spin_unlock(&analog_mailbox_lock, key);
+    (void)k_work_submit(&analog_work);
+    return 0;
 }
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1,
              "Codex supports one analog-stick adapter");
 #define CODEX_SOURCE_AXIS_VALID(axis, code) \
+    DT_SAME_NODE(DT_PARENT(DT_INST_PHANDLE(0, source_##axis##_channel)), \
+                 DT_INST_PHANDLE(0, input_device)) && \
+    DT_NODE_HAS_COMPAT(DT_PARENT(DT_INST_PHANDLE(0, source_##axis##_channel)), zmk_analog_input) && \
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), report_on_change_only) && \
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), evt_type) == INPUT_EV_REL && \
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), input_code) == code && \
@@ -384,6 +419,9 @@ BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1,
     !DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), invert)
 BUILD_ASSERT(CODEX_SOURCE_AXIS_VALID(x, INPUT_REL_X), "analog X source must pass absolute mV");
 BUILD_ASSERT(CODEX_SOURCE_AXIS_VALID(y, INPUT_REL_Y), "analog Y source must pass absolute mV");
+BUILD_ASSERT(!DT_SAME_NODE(DT_INST_PHANDLE(0, source_x_channel),
+                           DT_INST_PHANDLE(0, source_y_channel)),
+             "analog X and Y source children must be distinct");
 BUILD_ASSERT(DT_INST_PROP(0, max_x) > DT_INST_PROP(0, center_x),
              "codex,analog-stick max-x must exceed center-x");
 BUILD_ASSERT(DT_INST_PROP(0, max_y) > DT_INST_PROP(0, center_y),
@@ -501,6 +539,10 @@ int codex_analog_test_input_event(uint16_t code, int32_t value, bool sync)
 
 void codex_analog_test_reset(void)
 {
+    k_spinlock_key_t key = k_spin_lock(&analog_mailbox_lock);
+
+    atomic_clear(&analog_mailbox_pending);
+    k_spin_unlock(&analog_mailbox_lock, key);
     k_msgq_purge(&analog_queue);
     (void)k_work_cancel_delayable(&refresh_work);
     reset_analog_state(&default_state);

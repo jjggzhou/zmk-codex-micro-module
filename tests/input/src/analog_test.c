@@ -246,6 +246,28 @@ ZTEST(analog, test_queue_full_and_router_error_do_not_stop_worker)
     codex_input_test_wait_for_events(CONFIG_CODEX_ANALOG_QUEUE_DEPTH + 3U);
 }
 
+ZTEST(analog, test_blocked_worker_coalesces_final_center_and_cancels_stale_refresh)
+{
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4095, false));
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_Y, 2048, true));
+    codex_input_test_wait_for_events(1U);
+
+    codex_input_test_set_block_router(true);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.1f, .distance = 0.8f}));
+    zassert_ok(codex_input_test_wait_router_entered());
+    for (size_t i = 0U; i < CONFIG_CODEX_ANALOG_QUEUE_DEPTH + 2U; i++) {
+        zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4095 - (int32_t)i, true));
+    }
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 2048, true));
+    codex_input_test_release_router();
+    codex_input_test_set_block_router(false);
+    codex_input_test_wait_for_events(3U);
+    zassert_equal(strcmp(codex_input_test_event(2U),
+                         "{\"m\":\"v.oai.rad\",\"p\":{\"a\":0,\"d\":0}}"), 0);
+    k_sleep(K_MSEC(40));
+    zassert_equal(codex_input_test_event_count(), 3U);
+}
+
 ZTEST(analog, test_refresh_comparison_is_wrap_safe)
 {
     codex_analog_test_set_uptime(UINT32_MAX - 5U);
