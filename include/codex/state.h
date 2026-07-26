@@ -25,6 +25,8 @@ enum codex_connection_choice {
 struct codex_touch_diagnostics {
     uint32_t queue_full;
     uint32_t invalid_time;
+    uint32_t layer_api_errors;
+    uint32_t profile_api_errors;
 };
 
 void codex_touch_edge(bool touched, int64_t now_ms);

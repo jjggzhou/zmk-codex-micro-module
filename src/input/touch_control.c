@@ -36,13 +36,14 @@ static bool touched;
 static bool hold_handled;
 static int64_t press_ms;
 static int64_t last_activity_ms;
-static int64_t last_processed_ms;
 static enum codex_connection_choice connection_choice;
 static bool connection_choice_initialized;
 static atomic_t connection_mode;
 static atomic_t connection_choice_snapshot;
 static atomic_t queue_full_count;
 static atomic_t invalid_time_count;
+static atomic_t layer_api_error_count;
+static atomic_t profile_api_error_count;
 
 #if defined(CONFIG_ZTEST)
 static int64_t test_uptime_ms;
@@ -137,16 +138,26 @@ void codex_connection_tick(int64_t now_ms)
     submit_item(TOUCH_ITEM_TICK, false, now_ms);
 }
 
-static void enter_connection_mode(int64_t now_ms)
+static int enter_connection_mode(int64_t now_ms)
 {
+    enum codex_connection_choice initial = connection_choice;
+    int err = 0;
+
     if (!connection_choice_initialized || connection_choice != CODEX_CONNECTION_USB) {
-        connection_choice = codex_connection_initial_choice();
+        err = codex_connection_initial_choice(&initial);
+        if (err != 0) {
+            atomic_inc(&profile_api_error_count);
+            codex_indicators_render(codex_layers_current_indicator());
+            return err;
+        }
     }
+    connection_choice = initial;
     connection_choice_initialized = true;
     atomic_set(&connection_choice_snapshot, connection_choice);
     atomic_set(&connection_mode, true);
     last_activity_ms = now_ms;
     codex_indicators_render(codex_connection_indicator_bits(connection_choice));
+    return 0;
 }
 
 static void leave_connection_mode(void)
@@ -163,9 +174,20 @@ static void handle_hold(int64_t now_ms)
 
     hold_handled = true;
     if (!atomic_get(&connection_mode)) {
-        enter_connection_mode(now_ms);
+        (void)enter_connection_mode(now_ms);
     } else {
-        (void)codex_connection_clear_choice(connection_choice);
+        enum codex_connection_choice actual = connection_choice;
+        int err = codex_connection_clear_choice(connection_choice, &actual);
+
+        if (err != 0) {
+            atomic_inc(&profile_api_error_count);
+        }
+        if ((unsigned int)actual >= CODEX_CONNECTION_CHOICE_COUNT) {
+            leave_connection_mode();
+            return;
+        }
+        connection_choice = actual;
+        atomic_set(&connection_choice_snapshot, connection_choice);
         last_activity_ms = now_ms;
         codex_indicators_render(codex_connection_indicator_bits(connection_choice));
     }
@@ -201,18 +223,27 @@ static void handle_edge(const struct touch_item *item)
                                            CODEX_CONNECTION_CHOICE_COUNT);
         enum codex_connection_choice actual = connection_choice;
 
-        (void)codex_connection_apply_choice(requested, &actual);
+        int err = codex_connection_apply_choice(requested, &actual);
+
+        if (err != 0) {
+            atomic_inc(&profile_api_error_count);
+        }
+        if ((unsigned int)actual >= CODEX_CONNECTION_CHOICE_COUNT) {
+            leave_connection_mode();
+            return;
+        }
         connection_choice = actual;
         atomic_set(&connection_choice_snapshot, connection_choice);
         codex_indicators_render(codex_connection_indicator_bits(connection_choice));
     } else {
-        (void)codex_layers_cycle();
+        if (codex_layers_cycle() != 0) {
+            atomic_inc(&layer_api_error_count);
+        }
     }
 }
 
 static void handle_item(const struct touch_item *item)
 {
-    last_processed_ms = item->now_ms;
     if (item->kind == TOUCH_ITEM_EDGE) {
         handle_edge(item);
     } else {
@@ -243,13 +274,13 @@ static bool pop_item(struct touch_item *item)
 
 static void schedule_next_deadline(void)
 {
+    int64_t now_ms = touch_uptime_get();
     uint32_t delay_ms;
 
     if (touched && !hold_handled) {
-        delay_ms = remaining_ms(last_processed_ms, press_ms, CODEX_HOLD_MS);
+        delay_ms = remaining_ms(now_ms, press_ms, CODEX_HOLD_MS);
     } else if (atomic_get(&connection_mode)) {
-        delay_ms = remaining_ms(last_processed_ms, last_activity_ms,
-                                CODEX_CONNECTION_IDLE_MS);
+        delay_ms = remaining_ms(now_ms, last_activity_ms, CODEX_CONNECTION_IDLE_MS);
     } else {
         (void)k_work_cancel_delayable(&deadline_work);
         return;
@@ -286,6 +317,8 @@ struct codex_touch_diagnostics codex_touch_diagnostics_get(void)
     return (struct codex_touch_diagnostics){
         .queue_full = (uint32_t)atomic_get(&queue_full_count),
         .invalid_time = (uint32_t)atomic_get(&invalid_time_count),
+        .layer_api_errors = (uint32_t)atomic_get(&layer_api_error_count),
+        .profile_api_errors = (uint32_t)atomic_get(&profile_api_error_count),
     };
 }
 
@@ -337,13 +370,14 @@ void codex_touch_test_reset(void)
     hold_handled = false;
     press_ms = 0;
     last_activity_ms = 0;
-    last_processed_ms = 0;
     connection_choice = CODEX_CONNECTION_BLE_1;
     connection_choice_initialized = false;
     atomic_set(&connection_mode, false);
     atomic_set(&connection_choice_snapshot, CODEX_CONNECTION_BLE_1);
     atomic_set(&queue_full_count, 0);
     atomic_set(&invalid_time_count, 0);
+    atomic_set(&layer_api_error_count, 0);
+    atomic_set(&profile_api_error_count, 0);
     codex_touch_test_set_uptime(0);
     codex_indicators_reset();
 }

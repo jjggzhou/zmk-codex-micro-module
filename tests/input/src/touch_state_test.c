@@ -12,12 +12,17 @@
 
 #include <codex/state.h>
 
+extern struct k_work_delayable deadline_work;
+
 static bool fake_layers[CODEX_LAYER_COUNT];
 static uint8_t fake_layer_ids[CODEX_LAYER_COUNT];
 static int fake_layer_activate_error;
 static int fake_layer_deactivate_error;
+static unsigned int fake_activate_no_mutation_calls;
+static unsigned int fake_deactivate_no_mutation_calls;
 static uint8_t fake_active_profile;
 static int fake_profile_select_error;
+static uint8_t fake_profile_on_error;
 static enum zmk_transport fake_preferred_transport;
 static struct zmk_endpoint_instance fake_selected_endpoint;
 static int fake_endpoint_select_error;
@@ -58,30 +63,37 @@ uint8_t __wrap_zmk_keymap_layer_index_to_id(uint8_t index)
     return index < CODEX_LAYER_COUNT ? fake_layer_ids[index] : UINT8_MAX;
 }
 
+bool __wrap_zmk_keymap_layer_active(uint8_t layer)
+{
+    return layer < CODEX_LAYER_COUNT && fake_layers[layer];
+}
+
 int __wrap_zmk_keymap_layer_activate(uint8_t layer)
 {
-    if (fake_layer_activate_error != 0) {
-        return fake_layer_activate_error;
-    }
     if (layer >= CODEX_LAYER_COUNT) {
         return -EINVAL;
     }
+    if (fake_activate_no_mutation_calls > 0U) {
+        fake_activate_no_mutation_calls--;
+        return -EIO;
+    }
     fake_layers[layer] = true;
-    return 0;
+    return fake_layer_activate_error;
 }
 
 int __wrap_zmk_keymap_layer_deactivate(uint8_t layer)
 {
-    if (fake_layer_deactivate_error != 0) {
-        return fake_layer_deactivate_error;
-    }
     if (layer >= CODEX_LAYER_COUNT) {
         return -EINVAL;
+    }
+    if (fake_deactivate_no_mutation_calls > 0U) {
+        fake_deactivate_no_mutation_calls--;
+        return -EIO;
     }
     if (layer != 0U) {
         fake_layers[layer] = false;
     }
-    return 0;
+    return fake_layer_deactivate_error;
 }
 
 int __wrap_zmk_ble_active_profile_index(void) { return fake_active_profile; }
@@ -91,6 +103,9 @@ int __wrap_zmk_ble_prof_select(uint8_t profile)
     fake_profile_select_calls++;
     fake_last_profile = profile;
     if (fake_profile_select_error != 0) {
+        if (fake_profile_on_error != UINT8_MAX) {
+            fake_active_profile = fake_profile_on_error;
+        }
         return fake_profile_select_error;
     }
     fake_active_profile = profile;
@@ -173,8 +188,11 @@ static void reset_touch(void *fixture)
     fake_layers[0] = true;
     fake_layer_activate_error = 0;
     fake_layer_deactivate_error = 0;
+    fake_activate_no_mutation_calls = 0U;
+    fake_deactivate_no_mutation_calls = 0U;
     fake_active_profile = 0U;
     fake_profile_select_error = 0;
+    fake_profile_on_error = UINT8_MAX;
     fake_preferred_transport = ZMK_TRANSPORT_BLE;
     fake_selected_endpoint = (struct zmk_endpoint_instance){
         .transport = ZMK_TRANSPORT_BLE,
@@ -253,6 +271,54 @@ ZTEST(touch_state, test_layer_indices_are_converted_to_stable_ids_when_reordered
     zassert_equal(codex_indicator_bits(), CODEX_INDICATOR_MIDDLE);
 }
 
+ZTEST(touch_state, test_activate_event_error_after_mutation_still_reconciles_exclusive_layer)
+{
+    tap(0, 100);
+    fake_layer_activate_error = -EIO;
+    tap(1000, 1100);
+
+    zassert_false(fake_layers[1U]);
+    zassert_true(fake_layers[2U]);
+    zassert_equal(__wrap_zmk_keymap_highest_layer_active(), 2U);
+    zassert_equal(codex_indicator_bits(), CODEX_INDICATOR_BOTTOM);
+    zassert_equal(codex_touch_diagnostics_get().layer_api_errors, 1U);
+}
+
+ZTEST(touch_state, test_deactivate_event_error_after_mutation_keeps_exclusive_target)
+{
+    tap(0, 100);
+    fake_layer_deactivate_error = -EIO;
+    tap(1000, 1100);
+
+    zassert_false(fake_layers[1U]);
+    zassert_true(fake_layers[2U]);
+    zassert_equal(__wrap_zmk_keymap_highest_layer_active(), 2U);
+    zassert_equal(codex_indicator_bits(), CODEX_INDICATOR_BOTTOM);
+}
+
+ZTEST(touch_state, test_transient_no_mutation_error_is_reconciled_on_real_state)
+{
+    tap(0, 100);
+    fake_deactivate_no_mutation_calls = 1U;
+    tap(1000, 1100);
+
+    zassert_false(fake_layers[1U]);
+    zassert_true(fake_layers[2U]);
+    zassert_equal(__wrap_zmk_keymap_highest_layer_active(), 2U);
+}
+
+ZTEST(touch_state, test_unreconciled_partial_change_rolls_back_original_exact_layers)
+{
+    tap(0, 100);
+    fake_deactivate_no_mutation_calls = UINT8_MAX;
+    tap(1000, 1100);
+
+    zassert_true(fake_layers[1U]);
+    zassert_false(fake_layers[2U]);
+    zassert_equal(__wrap_zmk_keymap_highest_layer_active(), 1U);
+    zassert_equal(codex_indicator_bits(), CODEX_INDICATOR_MIDDLE);
+}
+
 ZTEST(touch_state, test_2999_is_tap_and_3000_is_one_hold_without_release_tap)
 {
     edge(true, 0);
@@ -300,6 +366,56 @@ ZTEST(touch_state, test_mode_initial_choice_reflects_ble_profile_or_usb_endpoint
     enter_mode(10000);
     zassert_equal(codex_connection_choice_get(), CODEX_CONNECTION_USB);
     zassert_equal(codex_indicator_bits(), 7U);
+}
+
+ZTEST(touch_state, test_unsupported_active_ble_profiles_are_really_normalized_to_profile_zero)
+{
+    fake_active_profile = 3U;
+    fake_selected_endpoint.ble.profile_index = 3U;
+    enter_mode(0);
+    zassert_equal(fake_profile_select_calls, 1U);
+    zassert_equal(fake_last_profile, 0U);
+    zassert_equal(fake_active_profile, 0U);
+    zassert_equal(codex_connection_choice_get(), CODEX_CONNECTION_BLE_1);
+
+    reset_touch(NULL);
+    fake_active_profile = 4U;
+    fake_selected_endpoint.ble.profile_index = 4U;
+    enter_mode(10000);
+    zassert_equal(fake_profile_select_calls, 1U);
+    zassert_equal(fake_last_profile, 0U);
+    zassert_equal(fake_active_profile, 0U);
+    zassert_equal(codex_connection_choice_get(), CODEX_CONNECTION_BLE_1);
+}
+
+ZTEST(touch_state, test_unsupported_profile_select_failure_does_not_enter_mode)
+{
+    fake_active_profile = 4U;
+    fake_selected_endpoint.ble.profile_index = 4U;
+    fake_profile_select_error = -EIO;
+    edge(true, 0);
+    tick(CODEX_HOLD_MS);
+
+    zassert_false(codex_connection_mode_active());
+    zassert_equal(fake_profile_select_calls, 1U);
+    zassert_equal(fake_active_profile, 4U);
+    zassert_equal(codex_indicator_bits(), CODEX_INDICATOR_TOP);
+    zassert_equal(codex_touch_diagnostics_get().profile_api_errors, 1U);
+    edge(false, CODEX_HOLD_MS);
+    zassert_equal(__wrap_zmk_keymap_highest_layer_active(), 0U);
+}
+
+ZTEST(touch_state, test_profile_error_refresh_never_aliases_unsupported_profile_to_ble_one)
+{
+    enter_mode(0);
+    fake_profile_select_error = -EIO;
+    fake_profile_on_error = 4U;
+    tap(4000, 4100);
+
+    zassert_equal(fake_active_profile, 4U);
+    zassert_false(codex_connection_mode_active());
+    zassert_equal(codex_indicator_bits(), CODEX_INDICATOR_TOP);
+    zassert_equal(codex_touch_diagnostics_get().profile_api_errors, 1U);
 }
 
 ZTEST(touch_state, test_mode_taps_cycle_ble_profiles_and_usb_with_exact_calls)
@@ -412,6 +528,48 @@ ZTEST(touch_state, test_real_delayable_handler_uses_fake_clock_without_sleep)
     zassert_false(codex_connection_mode_active());
 }
 
+ZTEST(touch_state, test_hold_deadline_remaining_uses_current_clock_after_worker_backlog)
+{
+    codex_touch_test_set_uptime(0);
+    zassert_true(k_work_submit(&touch_blocker) >= 0);
+    zassert_ok(k_sem_take(&touch_blocker_entered, K_MSEC(100)));
+    codex_touch_edge(true, 0);
+    codex_touch_test_set_uptime(2500);
+    k_sem_give(&touch_blocker_release);
+    drain();
+
+    uint32_t remaining =
+        k_ticks_to_ms_ceil32(k_work_delayable_remaining_get(&deadline_work));
+    zassert_between_inclusive(remaining, 499U,
+                              500U + k_ticks_to_ms_ceil32(1), "remaining=%u", remaining);
+
+    codex_touch_test_set_uptime(CODEX_HOLD_MS);
+    codex_touch_test_fire_deadline();
+    zassert_true(codex_connection_mode_active());
+}
+
+ZTEST(touch_state, test_idle_deadline_remaining_uses_current_clock_after_worker_backlog)
+{
+    enter_mode(0);
+    codex_touch_test_set_uptime(4000);
+    zassert_true(k_work_submit(&touch_blocker) >= 0);
+    zassert_ok(k_sem_take(&touch_blocker_entered, K_MSEC(100)));
+    codex_touch_edge(true, 4000);
+    codex_touch_edge(false, 4100);
+    codex_touch_test_set_uptime(8600);
+    k_sem_give(&touch_blocker_release);
+    drain();
+
+    uint32_t remaining =
+        k_ticks_to_ms_ceil32(k_work_delayable_remaining_get(&deadline_work));
+    zassert_between_inclusive(remaining, 499U,
+                              500U + k_ticks_to_ms_ceil32(1), "remaining=%u", remaining);
+
+    codex_touch_test_set_uptime(9100);
+    codex_touch_test_fire_deadline();
+    zassert_false(codex_connection_mode_active());
+}
+
 ZTEST(touch_state, test_edge_wins_same_deadline_race_when_queued_first)
 {
     enter_mode(0);
@@ -458,8 +616,8 @@ ZTEST(touch_state, test_api_errors_keep_choice_and_indicator_consistent)
     codex_touch_test_reset();
     fake_layer_activate_error = -EIO;
     tap(10000, 10100);
-    zassert_equal(__wrap_zmk_keymap_highest_layer_active(), 0U);
-    zassert_equal(codex_indicator_bits(), CODEX_INDICATOR_TOP);
+    zassert_equal(__wrap_zmk_keymap_highest_layer_active(), 1U);
+    zassert_equal(codex_indicator_bits(), CODEX_INDICATOR_MIDDLE);
 }
 
 ZTEST(touch_state, test_full_queue_is_counted_without_blocking_callback)

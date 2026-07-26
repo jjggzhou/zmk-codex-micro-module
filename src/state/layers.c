@@ -4,6 +4,66 @@
 
 #include "state_internal.h"
 
+#define RECONCILE_ATTEMPTS 2U
+
+static bool layer_state_matches(const zmk_keymap_layer_id_t ids[CODEX_LAYER_COUNT],
+                                const bool wanted[CODEX_LAYER_COUNT])
+{
+    for (uint8_t index = 1U; index < CODEX_LAYER_COUNT; index++) {
+        if (zmk_keymap_layer_active(ids[index]) != wanted[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int reconcile_layer_state(const zmk_keymap_layer_id_t ids[CODEX_LAYER_COUNT],
+                                 const bool wanted[CODEX_LAYER_COUNT])
+{
+    int first_error = 0;
+
+    for (uint8_t attempt = 0U; attempt < RECONCILE_ATTEMPTS; attempt++) {
+        bool unwanted_active = false;
+
+        /* Clear old overlays before enabling the target, preserving exclusivity. */
+        for (uint8_t index = 1U; index < CODEX_LAYER_COUNT; index++) {
+            int err;
+
+            if (wanted[index] || !zmk_keymap_layer_active(ids[index])) {
+                continue;
+            }
+            err = zmk_keymap_layer_deactivate(ids[index]);
+            if (first_error == 0 && err != 0) {
+                first_error = err;
+            }
+        }
+        for (uint8_t index = 1U; index < CODEX_LAYER_COUNT; index++) {
+            if (!wanted[index] && zmk_keymap_layer_active(ids[index])) {
+                unwanted_active = true;
+                break;
+            }
+        }
+        if (unwanted_active) {
+            continue;
+        }
+        for (uint8_t index = 1U; index < CODEX_LAYER_COUNT; index++) {
+            int err;
+
+            if (!wanted[index] || zmk_keymap_layer_active(ids[index])) {
+                continue;
+            }
+            err = zmk_keymap_layer_activate(ids[index]);
+            if (first_error == 0 && err != 0) {
+                first_error = err;
+            }
+        }
+        if (layer_state_matches(ids, wanted)) {
+            break;
+        }
+    }
+    return first_error;
+}
+
 uint8_t codex_layers_current_indicator(void)
 {
     return codex_layer_indicator_bits(zmk_keymap_highest_layer_active());
@@ -13,35 +73,35 @@ int codex_layers_cycle(void)
 {
     uint8_t current = zmk_keymap_highest_layer_active();
     uint8_t next = current < CODEX_LAYER_COUNT - 1U ? current + 1U : 0U;
-    int first_error = 0;
+    zmk_keymap_layer_id_t ids[CODEX_LAYER_COUNT];
+    bool original[CODEX_LAYER_COUNT] = {false};
+    bool wanted[CODEX_LAYER_COUNT] = {false};
+    int first_error;
 
-    if (next != 0U) {
-        zmk_keymap_layer_id_t next_id = zmk_keymap_layer_index_to_id(next);
-
-        if (next_id == ZMK_KEYMAP_LAYER_ID_INVAL) {
+    for (uint8_t index = 0U; index < CODEX_LAYER_COUNT; index++) {
+        ids[index] = zmk_keymap_layer_index_to_id(index);
+        if (ids[index] == ZMK_KEYMAP_LAYER_ID_INVAL) {
             codex_indicators_render(codex_layers_current_indicator());
             return -EINVAL;
         }
-        first_error = zmk_keymap_layer_activate(next_id);
-        if (first_error != 0) {
-            codex_indicators_render(codex_layers_current_indicator());
-            return first_error;
+        for (uint8_t prior = 0U; prior < index; prior++) {
+            if (ids[index] == ids[prior]) {
+                codex_indicators_render(codex_layers_current_indicator());
+                return -EINVAL;
+            }
         }
+        original[index] = zmk_keymap_layer_active(ids[index]);
+    }
+    if (next != 0U) {
+        wanted[next] = true;
     }
 
-    for (uint8_t layer = 1U; layer < CODEX_LAYER_COUNT; layer++) {
-        zmk_keymap_layer_id_t layer_id;
-        int err;
+    first_error = reconcile_layer_state(ids, wanted);
+    if (!layer_state_matches(ids, wanted)) {
+        int rollback_error = reconcile_layer_state(ids, original);
 
-        if (layer == next) {
-            continue;
-        }
-        layer_id = zmk_keymap_layer_index_to_id(layer);
-        err = layer_id == ZMK_KEYMAP_LAYER_ID_INVAL
-                  ? -EINVAL
-                  : zmk_keymap_layer_deactivate(layer_id);
-        if (first_error == 0 && err != 0) {
-            first_error = err;
+        if (first_error == 0) {
+            first_error = rollback_error != 0 ? rollback_error : -EIO;
         }
     }
 
