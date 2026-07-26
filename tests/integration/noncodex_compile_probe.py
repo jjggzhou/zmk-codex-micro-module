@@ -24,6 +24,7 @@ def main() -> None:
         "/src/transport/report_router.c",
         "/src/input/codex_keys.c",
         "/src/input/encoder.c",
+        "/src/input/activity_bridge.c",
         "/src/input/analog_stick.c",
         "/src/input/touch_control.c",
         "/src/state/layers.c",
@@ -34,6 +35,7 @@ def main() -> None:
         "/src/lighting/renderer.c",
     )
     found = sorted(source for source in sources if source.endswith(forbidden_suffixes))
+    found.extend(sorted(source for source in sources if "codex_zmk_activity_" in source))
     assert not found, f"Codex production sources leaked into non-Codex build: {found}"
     print("non-Codex compile probe: CONFIG_CODEX_MICRO=n and zero Codex production sources")
 

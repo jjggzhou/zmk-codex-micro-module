@@ -12,8 +12,13 @@
 #include <zephyr/ztest.h>
 
 #include <codex/input.h>
+#include <zmk/activity.h>
 
+#include "activity_test_support.h"
 #include "input_test_support.h"
+
+extern int set_state(enum zmk_activity_state state);
+extern void activity_work_handler(struct k_work *work);
 
 /* These test-only hooks feed the same input callback that production registers. */
 static void configure_default(void)
@@ -56,6 +61,72 @@ static bool wait_for_event_count(size_t count, uint32_t timeout_ms)
         k_sleep(K_MSEC(1));
     }
     return codex_input_test_event_count() == count;
+}
+
+static bool wait_for_activity_state(enum zmk_activity_state state, uint32_t timeout_ms)
+{
+    int64_t deadline = k_uptime_get() + timeout_ms;
+
+    while (zmk_activity_get_state() != state && k_uptime_get() < deadline) {
+        k_sleep(K_MSEC(1));
+    }
+    return zmk_activity_get_state() == state;
+}
+
+static void enter_idle_and_reset_activity_events(void)
+{
+    k_sleep(K_MSEC(5));
+    zassert_ok(set_state(ZMK_ACTIVITY_IDLE));
+    codex_activity_test_reset_events();
+}
+
+static void report_codex_sample(int32_t raw_x, int32_t raw_y)
+{
+    const struct device *codex_source = DEVICE_DT_GET(DT_NODELABEL(analog_input_test));
+
+    zassert_ok(input_report(codex_source, INPUT_EV_REL, INPUT_REL_X, raw_x, false, K_NO_WAIT));
+    zassert_ok(input_report(codex_source, INPUT_EV_REL, INPUT_REL_Y, raw_y, true, K_NO_WAIT));
+}
+
+ZTEST(analog, test_complete_codex_sample_inside_dead_zone_does_not_wake_idle)
+{
+    enter_idle_and_reset_activity_events();
+    report_codex_sample(2049, 2048);
+    k_sleep(K_MSEC(5));
+    zassert_equal(zmk_activity_get_state(), ZMK_ACTIVITY_IDLE);
+    zassert_equal(codex_activity_test_event_count(), 0U);
+}
+
+ZTEST(analog, test_codex_sample_strictly_above_distance_point_one_wakes_once)
+{
+    enter_idle_and_reset_activity_events();
+    report_codex_sample(4095, 2048);
+    zassert_true(wait_for_activity_state(ZMK_ACTIVITY_ACTIVE, 20U));
+    zassert_equal(codex_activity_test_event_count(), 1U);
+}
+
+ZTEST(analog, test_unrelated_pointing_device_retains_standard_zmk_activity)
+{
+    const struct device *ordinary_pointing = DEVICE_DT_GET(DT_NODELABEL(adc0));
+
+    enter_idle_and_reset_activity_events();
+    zassert_ok(input_report(ordinary_pointing, INPUT_EV_REL, INPUT_REL_X, 1, true, K_NO_WAIT));
+    zassert_true(wait_for_activity_state(ZMK_ACTIVITY_ACTIVE, 20U));
+    zassert_equal(codex_activity_test_event_count(), 1U);
+}
+
+ZTEST(analog, test_codex_noise_does_not_renew_standard_zmk_idle_timer)
+{
+    const struct device *ordinary_pointing = DEVICE_DT_GET(DT_NODELABEL(adc0));
+
+    enter_idle_and_reset_activity_events();
+    zassert_ok(input_report(ordinary_pointing, INPUT_EV_REL, INPUT_REL_X, 1, true, K_NO_WAIT));
+    zassert_true(wait_for_activity_state(ZMK_ACTIVITY_ACTIVE, 20U));
+    k_sleep(K_MSEC(CONFIG_ZMK_IDLE_TIMEOUT + 5));
+    report_codex_sample(2049, 2048);
+    k_sleep(K_MSEC(5));
+    activity_work_handler(NULL);
+    zassert_equal(zmk_activity_get_state(), ZMK_ACTIVITY_IDLE);
 }
 
 ZTEST(analog, test_center_is_exact_zero)

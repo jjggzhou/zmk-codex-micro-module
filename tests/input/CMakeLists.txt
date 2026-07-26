@@ -17,13 +17,14 @@ list(APPEND DTS_ROOT
   "${CMAKE_CURRENT_SOURCE_DIR}/../.."
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../zmk/app"
 )
+# Zephyr discovers the Codex module during find_package(), so publish the
+# exact pinned source path before module CMake is evaluated.
+set(CODEX_ZMK_ACTIVITY_SOURCE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../zmk/app/src/activity.c"
+  CACHE FILEPATH "Pinned ZMK activity source exercised by this fixture" FORCE
+)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(codex_input)
-
-if(NOT TARGET codex_micro)
-  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../..
-    ${CMAKE_CURRENT_BINARY_DIR}/codex_micro_module)
-endif()
 
 execute_process(
   COMMAND west list zmk -f {abspath}
@@ -31,6 +32,16 @@ execute_process(
   OUTPUT_STRIP_TRAILING_WHITESPACE
   COMMAND_ERROR_IS_FATAL ANY
 )
+
+# Compile the exact pinned ZMK activity implementation in this fixture.  The
+# Codex module must replace this source through the same audited path used by
+# production, not through a test-only activity mock.
+target_sources(app PRIVATE "${CODEX_ZMK_ACTIVITY_SOURCE}")
+
+if(NOT TARGET codex_micro)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../..
+    ${CMAKE_CURRENT_BINARY_DIR}/codex_micro_module)
+endif()
 
 target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../..
@@ -42,6 +53,7 @@ target_link_libraries(app PRIVATE codex_micro)
 target_sources(app PRIVATE
   src/key_test.c
   src/analog_test.c
+  src/activity_test_support.c
   src/touch_state_test.c
 )
 

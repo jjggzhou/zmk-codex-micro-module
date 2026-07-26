@@ -28,8 +28,105 @@ target_sources_ifdef(CONFIG_CODEX_MICRO codex_micro PRIVATE
 )
 
 target_sources_ifdef(CONFIG_CODEX_ANALOG_STICK codex_micro PRIVATE
+  src/input/activity_bridge.c
   src/input/analog_stick.c
 )
+
+# Pinned ZMK edf5c081 treats every Zephyr input event as pointing activity.
+# Codex's ADC source must instead wait for one complete calibrated radial
+# sample, while every unrelated pointing device keeps the upstream behavior.
+# Patch only the audited activity source and fail closed on any dependency or
+# source drift; this is the same replacement pattern used below for hog.c and
+# the pinned analog driver.
+if(CONFIG_CODEX_ANALOG_STICK AND CONFIG_ZMK_POINTING)
+  if(NOT DEFINED CODEX_ZMK_ACTIVITY_SOURCE)
+    set(CODEX_ZMK_ACTIVITY_SOURCE "${APPLICATION_SOURCE_DIR}/src/activity.c")
+  endif()
+  set(CODEX_ACTIVITY_PINNED_ZMK_COMMIT "edf5c0814fd3ea202e43aad2d68fd32e882a518c")
+  set(CODEX_ACTIVITY_PINNED_SHA256 "b67ad17db3aeb10fdede62183dfb8b319019ff916051d8adf7c1bb80a86c911e")
+  get_filename_component(CODEX_ACTIVITY_APP_DIR "${CODEX_ZMK_ACTIVITY_SOURCE}" DIRECTORY)
+  get_filename_component(CODEX_ACTIVITY_ZMK_DIR "${CODEX_ACTIVITY_APP_DIR}/../.." ABSOLUTE)
+
+  if(NOT EXISTS "${CODEX_ZMK_ACTIVITY_SOURCE}")
+    message(FATAL_ERROR "Pinned ZMK activity source is missing: ${CODEX_ZMK_ACTIVITY_SOURCE}")
+  endif()
+  execute_process(
+    COMMAND git -C "${CODEX_ACTIVITY_ZMK_DIR}" rev-parse HEAD
+    OUTPUT_VARIABLE CODEX_ACTIVITY_ACTUAL_ZMK_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE CODEX_ACTIVITY_ZMK_GIT_RESULT
+  )
+  file(SHA256 "${CODEX_ZMK_ACTIVITY_SOURCE}" CODEX_ACTIVITY_ACTUAL_SHA256)
+  if(NOT CODEX_ACTIVITY_ZMK_GIT_RESULT EQUAL 0 OR
+     NOT CODEX_ACTIVITY_ACTUAL_ZMK_COMMIT STREQUAL CODEX_ACTIVITY_PINNED_ZMK_COMMIT OR
+     NOT CODEX_ACTIVITY_ACTUAL_SHA256 STREQUAL CODEX_ACTIVITY_PINNED_SHA256)
+    message(FATAL_ERROR
+      "Codex activity override requires audited ZMK ${CODEX_ACTIVITY_PINNED_ZMK_COMMIT} activity.c")
+  endif()
+
+  file(READ "${CODEX_ZMK_ACTIVITY_SOURCE}" CODEX_ACTIVITY_PATCHED_SOURCE)
+  set(CODEX_ACTIVITY_ORIGINAL_SOURCE "${CODEX_ACTIVITY_PATCHED_SOURCE}")
+  set(CODEX_ACTIVITY_INCLUDE_ANCHOR "#include <zmk/activity.h>")
+  set(CODEX_ACTIVITY_INCLUDE_PATCH
+      "#include <zmk/activity.h>\n#include <codex/activity.h>")
+  set(CODEX_ACTIVITY_NOTE_ANCHOR "static int note_activity(void)")
+  set(CODEX_ACTIVITY_LISTENER_ANCHOR
+      "static void activity_input_listener(struct input_event *ev) { k_work_submit(&note_activity_work); }")
+  set(CODEX_ACTIVITY_LISTENER_PATCH
+      "static void activity_input_listener(struct input_event *ev) {\n    if (!codex_activity_defer_input_device(ev->dev)) {\n        k_work_submit(&note_activity_work);\n    }\n}")
+  foreach(CODEX_ACTIVITY_REQUIRED_ANCHOR
+          CODEX_ACTIVITY_INCLUDE_ANCHOR CODEX_ACTIVITY_NOTE_ANCHOR
+          CODEX_ACTIVITY_LISTENER_ANCHOR)
+    string(FIND "${CODEX_ACTIVITY_PATCHED_SOURCE}"
+           "${${CODEX_ACTIVITY_REQUIRED_ANCHOR}}" CODEX_ACTIVITY_ANCHOR_INDEX)
+    if(CODEX_ACTIVITY_ANCHOR_INDEX EQUAL -1)
+      message(FATAL_ERROR
+        "Pinned ZMK activity API/source anchor changed: ${CODEX_ACTIVITY_REQUIRED_ANCHOR}")
+    endif()
+  endforeach()
+  string(REPLACE "${CODEX_ACTIVITY_INCLUDE_ANCHOR}" "${CODEX_ACTIVITY_INCLUDE_PATCH}"
+    CODEX_ACTIVITY_PATCHED_SOURCE "${CODEX_ACTIVITY_PATCHED_SOURCE}")
+  string(REPLACE "${CODEX_ACTIVITY_NOTE_ANCHOR}" "int codex_zmk_activity_note(void)"
+    CODEX_ACTIVITY_PATCHED_SOURCE "${CODEX_ACTIVITY_PATCHED_SOURCE}")
+  string(REPLACE "note_activity();" "codex_zmk_activity_note();"
+    CODEX_ACTIVITY_PATCHED_SOURCE "${CODEX_ACTIVITY_PATCHED_SOURCE}")
+  string(REPLACE "${CODEX_ACTIVITY_LISTENER_ANCHOR}" "${CODEX_ACTIVITY_LISTENER_PATCH}"
+    CODEX_ACTIVITY_PATCHED_SOURCE "${CODEX_ACTIVITY_PATCHED_SOURCE}")
+  if(CODEX_ACTIVITY_PATCHED_SOURCE STREQUAL CODEX_ACTIVITY_ORIGINAL_SOURCE)
+    message(FATAL_ERROR "Audited ZMK activity source was not patched")
+  endif()
+
+  set(CODEX_ACTIVITY_PATCHED_SOURCE_PATH
+      "${CMAKE_CURRENT_BINARY_DIR}/codex_zmk_activity_edf5c081.c")
+  file(WRITE "${CODEX_ACTIVITY_PATCHED_SOURCE_PATH}" "${CODEX_ACTIVITY_PATCHED_SOURCE}")
+  set(CODEX_ACTIVITY_OVERRIDE_SOURCE "${CODEX_ZMK_ACTIVITY_SOURCE}"
+      CACHE INTERNAL "Audited ZMK activity source")
+  set(CODEX_ACTIVITY_OVERRIDE_PATCHED_SOURCE "${CODEX_ACTIVITY_PATCHED_SOURCE_PATH}"
+      CACHE INTERNAL "Generated Codex-aware ZMK activity source")
+
+  function(codex_replace_pinned_zmk_activity)
+    get_target_property(CODEX_ACTIVITY_APP_SOURCES app SOURCES)
+    list(FIND CODEX_ACTIVITY_APP_SOURCES "src/activity.c" CODEX_ACTIVITY_RELATIVE_INDEX)
+    list(FIND CODEX_ACTIVITY_APP_SOURCES "${CODEX_ACTIVITY_OVERRIDE_SOURCE}"
+         CODEX_ACTIVITY_ABSOLUTE_INDEX)
+    if(CODEX_ACTIVITY_RELATIVE_INDEX EQUAL -1 AND CODEX_ACTIVITY_ABSOLUTE_INDEX EQUAL -1)
+      message(FATAL_ERROR "Pinned ZMK app target no longer contains activity.c")
+    endif()
+    list(REMOVE_ITEM CODEX_ACTIVITY_APP_SOURCES
+         "src/activity.c" "${CODEX_ACTIVITY_OVERRIDE_SOURCE}")
+    list(FIND CODEX_ACTIVITY_APP_SOURCES "src/activity.c" CODEX_ACTIVITY_RELATIVE_REMAINS)
+    list(FIND CODEX_ACTIVITY_APP_SOURCES "${CODEX_ACTIVITY_OVERRIDE_SOURCE}"
+         CODEX_ACTIVITY_ABSOLUTE_REMAINS)
+    if(NOT CODEX_ACTIVITY_RELATIVE_REMAINS EQUAL -1 OR
+       NOT CODEX_ACTIVITY_ABSOLUTE_REMAINS EQUAL -1)
+      message(FATAL_ERROR "Failed to remove pinned ZMK app/src/activity.c")
+    endif()
+    set_property(TARGET app PROPERTY SOURCES "${CODEX_ACTIVITY_APP_SOURCES}")
+    target_sources(app PRIVATE "${CODEX_ACTIVITY_OVERRIDE_PATCHED_SOURCE}")
+  endfunction()
+  cmake_language(DEFER DIRECTORY "${APPLICATION_SOURCE_DIR}"
+    CALL codex_replace_pinned_zmk_activity)
+endif()
 
 # badjeff 2684f22 has an unsigned reverse loop which walks past index zero when
 # every report-on-change-only channel is unchanged. Keep west pinned to that

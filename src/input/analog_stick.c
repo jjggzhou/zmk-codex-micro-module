@@ -1,5 +1,6 @@
 #define DT_DRV_COMPAT codex_analog_stick
 
+#include <codex/activity.h>
 #include <codex/input.h>
 #include <codex/transport.h>
 
@@ -20,6 +21,7 @@
 #define CODEX_ANALOG_JSON_MAX 64U
 #define CODEX_ANALOG_SCALE 10000U
 #define CODEX_ANALOG_TAU 6.28318530717958647692f
+#define CODEX_ANALOG_ACTIVITY_DISTANCE 0.1f
 
 struct codex_analog_calibration_internal {
     int32_t center_x;
@@ -359,6 +361,9 @@ static bool process_mailbox(void)
     k_spin_unlock(&analog_mailbox_lock, key);
     if (item.type == CODEX_ANALOG_ITEM_RAW) {
         radial = normalize_with(&active_state->calibration, item.value.raw.x, item.value.raw.y);
+        if (radial.distance > CODEX_ANALOG_ACTIVITY_DISTANCE) {
+            (void)codex_zmk_activity_note();
+        }
     } else if (item.type == CODEX_ANALOG_ITEM_RADIAL) {
         radial = item.value.radial;
     } else {

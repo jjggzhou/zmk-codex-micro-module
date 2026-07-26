@@ -28,6 +28,18 @@ config ZMK_HID_INDICATORS
     bool
     default y
 
+config ZMK_POINTING
+    bool
+    default y
+
+config ZMK_IDLE_TIMEOUT
+    int
+    default 40
+
+config ZMK_LOG_LEVEL
+    int
+    default 0
+
 config NRF_STORE_REBOOT_TYPE_GPREGRET
     bool
     default n
