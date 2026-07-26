@@ -268,6 +268,28 @@ ZTEST(analog, test_blocked_worker_coalesces_final_center_and_cancels_stale_refre
     zassert_equal(codex_input_test_event_count(), 3U);
 }
 
+ZTEST(analog, test_blocked_worker_coalesces_final_noncenter_and_router_error_continues)
+{
+    codex_input_test_set_block_router(true);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.1f, .distance = 0.4f}));
+    zassert_ok(codex_input_test_wait_router_entered());
+    for (size_t i = 0U; i < CONFIG_CODEX_ANALOG_QUEUE_DEPTH + 2U; i++) {
+        zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 2048 + (int32_t)i, true));
+    }
+    zassert_ok(codex_analog_test_input_event(INPUT_REL_X, 4095, true));
+    codex_input_test_release_router();
+    codex_input_test_set_block_router(false);
+    codex_input_test_wait_for_events(2U);
+    zassert_true(strstr(codex_input_test_event(1U), "\"d\":1") != NULL);
+
+    codex_input_test_set_router_result(-ENOMSG);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.3f, .distance = 0.6f}));
+    codex_input_test_wait_for_events(3U);
+    codex_input_test_set_router_result(0);
+    zassert_ok(codex_input_radial_emit((struct codex_radial){.angle = 0.4f, .distance = 0.6f}));
+    codex_input_test_wait_for_events(4U);
+}
+
 ZTEST(analog, test_refresh_comparison_is_wrap_safe)
 {
     codex_analog_test_set_uptime(UINT32_MAX - 5U);
