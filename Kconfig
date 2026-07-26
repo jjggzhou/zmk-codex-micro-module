@@ -20,6 +20,14 @@ config CODEX_INPUT_EVENT_QUEUE_DEPTH
     help
       Number of validated key and encoder edges owned by the input worker.
 
+config CODEX_TOUCH_QUEUE_DEPTH
+    int "Codex touch edge queue depth"
+    default 16
+    range 4 32
+    help
+      Number of timestamped touch edges and deadline ticks that can wait for
+      the serialized touch state worker. The GPIO callback never blocks.
+
 config CODEX_ANALOG_STICK
     bool "Codex analog-stick input adapter"
     default n

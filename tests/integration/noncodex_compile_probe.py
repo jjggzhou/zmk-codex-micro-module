@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove Codex transport production sources are absent when CONFIG_CODEX_MICRO=n."""
+"""Prove Codex production sources are absent when CONFIG_CODEX_MICRO=n."""
 
 import argparse
 import json
@@ -25,10 +25,14 @@ def main() -> None:
         "/src/input/codex_keys.c",
         "/src/input/encoder.c",
         "/src/input/analog_stick.c",
+        "/src/input/touch_control.c",
+        "/src/state/layers.c",
+        "/src/state/connection_mode.c",
+        "/src/state/indicators.c",
     )
     found = sorted(source for source in sources if source.endswith(forbidden_suffixes))
-    assert not found, f"Codex BLE production sources leaked into non-Codex build: {found}"
-    print("non-Codex compile probe: CONFIG_CODEX_MICRO=n and zero Codex transport production sources")
+    assert not found, f"Codex production sources leaked into non-Codex build: {found}"
+    print("non-Codex compile probe: CONFIG_CODEX_MICRO=n and zero Codex production sources")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,10 @@ target_sources_ifdef(CONFIG_CODEX_MICRO codex_micro PRIVATE
   src/protocol/device_status.c
   src/input/codex_keys.c
   src/input/encoder.c
+  src/input/touch_control.c
+  src/state/layers.c
+  src/state/connection_mode.c
+  src/state/indicators.c
   src/transport/ble_queue.c
   src/transport/ble_report_state.c
   src/transport/usb_transport.c

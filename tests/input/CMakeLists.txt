@@ -35,10 +35,24 @@ execute_process(
 target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../..
   ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+  ${ZMK_SOURCE_DIR}/app/include
 )
 target_include_directories(codex_micro PRIVATE ${ZMK_SOURCE_DIR}/app/include)
 target_link_libraries(app PRIVATE codex_micro)
 target_sources(app PRIVATE
   src/key_test.c
   src/analog_test.c
+  src/touch_state_test.c
+)
+
+zephyr_ld_options(
+  -Wl,--wrap=zmk_keymap_highest_layer_active
+  -Wl,--wrap=zmk_keymap_layer_index_to_id
+  -Wl,--wrap=zmk_keymap_layer_activate
+  -Wl,--wrap=zmk_keymap_layer_deactivate
+  -Wl,--wrap=zmk_ble_active_profile_index
+  -Wl,--wrap=zmk_ble_prof_select
+  -Wl,--wrap=zmk_ble_clear_bonds
+  -Wl,--wrap=zmk_endpoints_select_transport
+  -Wl,--wrap=zmk_endpoints_selected
 )
