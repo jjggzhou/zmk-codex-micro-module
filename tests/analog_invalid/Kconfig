@@ -1,0 +1,15 @@
+source "Kconfig.zephyr"
+
+rsource "../../Kconfig"
+
+config ZMK_HID_REPORT_TYPE_HKRO
+    bool
+    default y
+
+config ZMK_HID_CONSUMER_REPORT_USAGES_FULL
+    bool
+    default y
+
+config ZMK_HID_INDICATORS
+    bool
+    default y

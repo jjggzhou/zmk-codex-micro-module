@@ -404,10 +404,7 @@ static int analog_input_event(struct codex_analog_state *state, const struct inp
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1,
              "Codex supports one analog-stick adapter");
-#define CODEX_SOURCE_AXIS_VALID(axis, code) \
-    DT_SAME_NODE(DT_PARENT(DT_INST_PHANDLE(0, source_##axis##_channel)), \
-                 DT_INST_PHANDLE(0, input_device)) && \
-    DT_NODE_HAS_COMPAT(DT_PARENT(DT_INST_PHANDLE(0, source_##axis##_channel)), zmk_analog_input) && \
+#define CODEX_SOURCE_AXIS_TRANSPARENT(axis, code) \
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), report_on_change_only) && \
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), evt_type) == INPUT_EV_REL && \
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), input_code) == code && \
@@ -417,8 +414,17 @@ BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1,
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), scale_multiplier) == 1 && \
     DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), scale_divisor) == 1 && \
     !DT_PROP(DT_INST_PHANDLE(0, source_##axis##_channel), invert)
-BUILD_ASSERT(CODEX_SOURCE_AXIS_VALID(x, INPUT_REL_X), "analog X source must pass absolute mV");
-BUILD_ASSERT(CODEX_SOURCE_AXIS_VALID(y, INPUT_REL_Y), "analog Y source must pass absolute mV");
+BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_INST_PHANDLE(0, input_device), zmk_analog_input),
+             "analog input-device must be zmk,analog-input");
+BUILD_ASSERT(DT_SAME_NODE(DT_PARENT(DT_INST_PHANDLE(0, source_x_channel)),
+                          DT_INST_PHANDLE(0, input_device)) &&
+                 DT_SAME_NODE(DT_PARENT(DT_INST_PHANDLE(0, source_y_channel)),
+                              DT_INST_PHANDLE(0, input_device)),
+             "analog source channels must be children of input-device");
+BUILD_ASSERT(CODEX_SOURCE_AXIS_TRANSPARENT(x, INPUT_REL_X),
+             "analog X source must pass absolute mV");
+BUILD_ASSERT(CODEX_SOURCE_AXIS_TRANSPARENT(y, INPUT_REL_Y),
+             "analog Y source must pass absolute mV");
 BUILD_ASSERT(!DT_SAME_NODE(DT_INST_PHANDLE(0, source_x_channel),
                            DT_INST_PHANDLE(0, source_y_channel)),
              "analog X and Y source children must be distinct");
