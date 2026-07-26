@@ -7,8 +7,11 @@
 #include <zephyr/ztest.h>
 
 #include <codex/rpc.h>
+#include <codex/lighting.h>
+#include <codex/state.h>
 
 #include "json_value.h"
+#include "state_internal.h"
 #include "zmk_fakes.h"
 
 struct capture {
@@ -33,6 +36,71 @@ static int capture_emit(enum codex_transport source, const uint8_t *json,
     capture->count++;
     memcpy(capture->json, json, len);
     return capture->result;
+}
+
+struct ordering_capture {
+    struct capture response;
+    enum codex_effect observed_effect;
+};
+
+struct concurrent_emit_context {
+    struct k_sem outer_entered;
+    struct k_sem inner_emitted;
+    struct capture inner;
+    uint8_t outer_response[CODEX_JSON_MAX_SIZE];
+    size_t outer_len;
+    int inner_result;
+};
+
+K_THREAD_STACK_DEFINE(concurrent_emit_stack, 2048);
+static struct k_thread concurrent_emit_thread;
+
+static int inner_emit(enum codex_transport source, const uint8_t *json,
+                      size_t len, void *ctx)
+{
+    struct concurrent_emit_context *context = ctx;
+    int err = capture_emit(source, json, len, &context->inner);
+
+    k_sem_give(&context->inner_emitted);
+    return err;
+}
+
+static int waiting_outer_emit(enum codex_transport source, const uint8_t *json,
+                              size_t len, void *ctx)
+{
+    struct concurrent_emit_context *context = ctx;
+
+    ARG_UNUSED(source);
+    zassert_true(len <= sizeof(context->outer_response));
+    context->outer_len = len;
+    memcpy(context->outer_response, json, len);
+    k_sem_give(&context->outer_entered);
+    if (k_sem_take(&context->inner_emitted, K_MSEC(100)) != 0) {
+        return -ETIMEDOUT;
+    }
+    return memcmp(context->outer_response, json, len) == 0 ? 0 : -EILSEQ;
+}
+
+static void concurrent_dispatch(void *arg1, void *arg2, void *arg3)
+{
+    struct concurrent_emit_context *context = arg1;
+    static const char request[] = "{\"m\":\"sys.version\",\"id\":2}";
+
+    ARG_UNUSED(arg2);
+    ARG_UNUSED(arg3);
+    k_sem_take(&context->outer_entered, K_FOREVER);
+    context->inner_result = codex_rpc_dispatch(
+        CODEX_TRANSPORT_BLE, (const uint8_t *)request, strlen(request),
+        inner_emit, context);
+}
+
+static int ordering_emit(enum codex_transport source, const uint8_t *json,
+                         size_t len, void *ctx)
+{
+    struct ordering_capture *capture = ctx;
+
+    capture->observed_effect = codex_lighting_snapshot().keys.effect;
+    return capture_emit(source, json, len, &capture->response);
 }
 
 static int dispatch_bytes(const uint8_t *json, size_t len, struct capture *capture)
@@ -77,35 +145,212 @@ static void expect_success(const char *request, const char *method,
     zassert_equal(response_has(&capture, "\"method\":"), !standard);
 }
 
+static void before(void *fixture)
+{
+    ARG_UNUSED(fixture);
+    codex_lighting_test_reset();
+    codex_indicators_reset();
+}
+
 ZTEST(rpc, test_dispatches_both_request_shapes_and_all_supported_methods)
 {
     static const struct {
         const char *method;
+        const char *params;
         const char *result;
     } cases[] = {
-        {"sys.version", "\"version\":\"0.4.1\""},
-        {"device.status", "\"battery\":50"},
-        {"v.oai.rgbcfg", "\"ok\":1"},
-        {"v.oai.thstatus", "\"ok\":1"},
-        {"lights.preview", "\"result\":null"},
-        {"ui.active_screen", "\"result\":null"},
-        {"ui.home_accent_color", "\"result\":null"},
-        {"host.focused_app", "\"ok\":1"},
+        {"sys.version", "null", "\"version\":\"0.4.1\""},
+        {"device.status", "{}", "\"battery\":50"},
+        {"v.oai.rgbcfg", "{\"keys\":{\"e\":1}}", "\"ok\":1"},
+        {"v.oai.thstatus", "[{\"id\":0,\"e\":1}]", "\"ok\":1"},
+        {"lights.preview", "null", "\"result\":null"},
+        {"ui.active_screen", "{}", "\"result\":null"},
+        {"ui.home_accent_color", "{}", "\"result\":null"},
+        {"host.focused_app", "{}", "\"ok\":1"},
     };
     char request[180];
 
     rpc_fake_status_set(1, 2, 50, true);
     for (size_t i = 0U; i < ARRAY_SIZE(cases); i++) {
         snprintk(request, sizeof(request),
-                 "{\"m\":\"%s\",\"p\":null,\"id\":%u}", cases[i].method,
-                 (unsigned int)i + 1U);
+                 "{\"m\":\"%s\",\"p\":%s,\"id\":%u}", cases[i].method,
+                 cases[i].params, (unsigned int)i + 1U);
         expect_success(request, cases[i].method, cases[i].result, false);
         snprintk(request, sizeof(request),
                  "{\"jsonrpc\":\"2.0\",\"method\":\"%s\","
-                 "\"params\":{},\"id\":\"s%u\"}", cases[i].method,
-                 (unsigned int)i);
+                 "\"params\":%s,\"id\":\"s%u\"}", cases[i].method,
+                 cases[i].params, (unsigned int)i);
         expect_success(request, cases[i].method, cases[i].result, true);
     }
+}
+
+ZTEST(rpc, test_lighting_methods_apply_compact_and_standard_params_before_ack)
+{
+    struct capture capture;
+    struct codex_lighting_model model;
+
+    zassert_ok(dispatch("{\"m\":\"v.oai.rgbcfg\",\"p\":{\"keys\":{\"e\":1,"
+                        "\"c\":66051}},\"id\":7}", &capture));
+    static const char compact_ack[] =
+        "{\"result\":{\"ok\":1},\"id\":7,\"method\":\"v.oai.rgbcfg\"}";
+
+    zassert_equal(capture.len, sizeof(compact_ack) - 1U);
+    zassert_mem_equal(capture.json, compact_ack, sizeof(compact_ack) - 1U);
+    model = codex_lighting_snapshot();
+    zassert_equal(model.keys.effect, CODEX_EFFECT_SOLID);
+    zassert_equal(model.keys.color, 0x010203U);
+
+    zassert_ok(dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"v.oai.thstatus\","
+                        "\"params\":[{\"id\":4,\"e\":3,\"sk\":1}],\"id\":8}",
+                        &capture));
+    static const char standard_ack[] =
+        "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":1},\"id\":8}";
+
+    zassert_equal(capture.len, sizeof(standard_ack) - 1U);
+    zassert_mem_equal(capture.json, standard_ack, sizeof(standard_ack) - 1U);
+    model = codex_lighting_snapshot();
+    zassert_equal(model.agents[4].zone.effect, CODEX_EFFECT_RAINBOW);
+    zassert_true(model.agents[4].sk);
+}
+
+ZTEST(rpc, test_lighting_notifications_commit_without_emitting)
+{
+    struct capture capture;
+
+    zassert_ok(dispatch("{\"m\":\"v.oai.rgbcfg\",\"p\":{\"ambient\":{\"e\":5}}}",
+                        &capture));
+    zassert_equal(capture.count, 0U);
+    zassert_equal(codex_lighting_snapshot().ambient.effect, CODEX_EFFECT_GRADIENT);
+
+    zassert_ok(dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"v.oai.thstatus\","
+                        "\"params\":[{\"id\":2,\"e\":6}]}", &capture));
+    zassert_equal(capture.count, 0U);
+    zassert_equal(codex_lighting_snapshot().agents[2].zone.effect,
+                  CODEX_EFFECT_SHALLOW_BREATH);
+}
+
+ZTEST(rpc, test_invalid_lighting_params_have_stable_errors_and_atomic_state)
+{
+    struct capture capture;
+
+    zassert_ok(dispatch("{\"m\":\"v.oai.rgbcfg\",\"p\":{\"keys\":{\"e\":1}},"
+                        "\"id\":1}", &capture));
+    struct codex_lighting_model before = codex_lighting_snapshot();
+    static const struct {
+        const char *request;
+        const char *response;
+    } invalid[] = {
+        {"{\"m\":\"v.oai.rgbcfg\",\"id\":7}",
+         "{\"error\":{\"code\":400,\"message\":\"Invalid params\"},\"id\":7}"},
+        {"{\"m\":\"v.oai.rgbcfg\",\"p\":null,\"id\":7}",
+         "{\"error\":{\"code\":400,\"message\":\"Invalid params\"},\"id\":7}"},
+        {"{\"m\":\"v.oai.rgbcfg\",\"p\":[],\"id\":7}",
+         "{\"error\":{\"code\":400,\"message\":\"Invalid params\"},\"id\":7}"},
+        {"{\"jsonrpc\":\"2.0\",\"method\":\"v.oai.thstatus\","
+         "\"params\":{},\"id\":9}",
+         "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":400,"
+         "\"message\":\"Invalid params\"},\"id\":9}"},
+        {"{\"jsonrpc\":\"2.0\",\"method\":\"v.oai.thstatus\","
+         "\"params\":[{\"id\":1,\"e\":2},{\"id\":1,\"e\":3}],\"id\":9}",
+         "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":400,"
+         "\"message\":\"Invalid params\"},\"id\":9}"},
+        {"{\"m\":\"v.oai.rgbcfg\",\"p\":{\"keys\":{\"e\":2},"
+         "\"ambient\":{\"e\":3,\"e\":4}},\"id\":7}",
+         "{\"error\":{\"code\":400,\"message\":\"Invalid params\"},\"id\":7}"},
+    };
+
+    for (size_t i = 0U; i < ARRAY_SIZE(invalid); i++) {
+        struct codex_lighting_model after;
+
+        zassert_ok(dispatch(invalid[i].request, &capture), "%s", invalid[i].request);
+        zassert_equal(capture.len, strlen(invalid[i].response));
+        zassert_mem_equal(capture.json, invalid[i].response, capture.len);
+        after = codex_lighting_snapshot();
+        zassert_mem_equal(&after, &before, sizeof(before));
+    }
+}
+
+ZTEST(rpc, test_invalid_lighting_notification_returns_error_without_response_or_mutation)
+{
+    struct capture capture;
+    struct codex_lighting_model before = codex_lighting_snapshot();
+
+    zassert_equal(dispatch("{\"m\":\"v.oai.rgbcfg\",\"p\":{}}", &capture),
+                  -EINVAL);
+    zassert_equal(capture.count, 0U);
+    struct codex_lighting_model after = codex_lighting_snapshot();
+
+    zassert_mem_equal(&after, &before, sizeof(before));
+}
+
+ZTEST(rpc, test_preview_and_lighting_updates_never_touch_mono_indicator_state)
+{
+    struct capture capture;
+
+    codex_indicators_render(CODEX_INDICATOR_MIDDLE | CODEX_INDICATOR_BOTTOM);
+    zassert_equal(codex_indicator_bits(),
+                  CODEX_INDICATOR_MIDDLE | CODEX_INDICATOR_BOTTOM);
+    zassert_ok(dispatch("{\"m\":\"v.oai.rgbcfg\",\"p\":{\"keys\":{\"e\":1}},"
+                        "\"id\":1}", &capture));
+    struct codex_lighting_model before = codex_lighting_snapshot();
+
+    zassert_ok(dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"lights.preview\","
+                        "\"params\":{\"e\":6,\"c\":16777215},\"id\":2}",
+                        &capture));
+    struct codex_lighting_model after = codex_lighting_snapshot();
+
+    zassert_mem_equal(&after, &before, sizeof(before));
+    zassert_equal(codex_indicator_bits(),
+                  CODEX_INDICATOR_MIDDLE | CODEX_INDICATOR_BOTTOM);
+}
+
+ZTEST(rpc, test_emit_failure_does_not_roll_back_lighting_commit)
+{
+    struct capture capture = {.result = -EIO};
+    const char *request = "{\"m\":\"v.oai.rgbcfg\",\"p\":{\"keys\":{\"e\":4}},"
+                          "\"id\":1}";
+
+    zassert_equal(codex_rpc_dispatch(CODEX_TRANSPORT_BLE,
+                                     (const uint8_t *)request, strlen(request),
+                                     capture_emit, &capture), -EIO);
+    zassert_equal(capture.count, 1U);
+    zassert_equal(codex_lighting_snapshot().keys.effect, CODEX_EFFECT_BREATH);
+}
+
+ZTEST(rpc, test_lighting_commit_is_visible_inside_ack_emit_callback)
+{
+    struct ordering_capture capture = {0};
+    const char *request = "{\"m\":\"v.oai.rgbcfg\",\"p\":{\"keys\":{\"e\":5}},"
+                          "\"id\":1}";
+
+    zassert_ok(codex_rpc_dispatch(CODEX_TRANSPORT_USB,
+                                  (const uint8_t *)request, strlen(request),
+                                  ordering_emit, &capture));
+    zassert_equal(capture.response.count, 1U);
+    zassert_equal(capture.observed_effect, CODEX_EFFECT_GRADIENT);
+}
+
+ZTEST(rpc, test_concurrent_emit_has_stable_bytes_without_internal_lock)
+{
+    struct concurrent_emit_context context = {0};
+    static const char request[] = "{\"m\":\"sys.version\",\"id\":1}";
+
+    k_sem_init(&context.outer_entered, 0, 1);
+    k_sem_init(&context.inner_emitted, 0, 1);
+    k_thread_create(&concurrent_emit_thread, concurrent_emit_stack,
+                    K_THREAD_STACK_SIZEOF(concurrent_emit_stack),
+                    concurrent_dispatch, &context, NULL, NULL,
+                    K_PRIO_PREEMPT(1), 0, K_NO_WAIT);
+
+    int outer_result = codex_rpc_dispatch(
+        CODEX_TRANSPORT_USB, (const uint8_t *)request, strlen(request),
+        waiting_outer_emit, &context);
+
+    zassert_ok(k_thread_join(&concurrent_emit_thread, K_SECONDS(1)));
+    zassert_ok(outer_result);
+    zassert_ok(context.inner_result);
+    zassert_equal(context.inner.count, 1U);
+    zassert_true(response_has(&context.inner, "\"id\":2"));
 }
 
 ZTEST(rpc, test_device_status_is_a_fresh_bounded_zmk_snapshot)
@@ -349,4 +594,4 @@ ZTEST(rpc, test_argument_validation)
                   -EMSGSIZE);
 }
 
-ZTEST_SUITE(rpc, NULL, NULL, NULL, NULL, NULL);
+ZTEST_SUITE(rpc, NULL, NULL, before, NULL, NULL);

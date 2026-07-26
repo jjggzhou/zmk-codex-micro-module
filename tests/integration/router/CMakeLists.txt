@@ -24,5 +24,7 @@ target_sources(app PRIVATE
   ../../../src/protocol/json_value.c
   ../../../src/protocol/rpc.c
   ../../../src/protocol/device_status.c
+  ../../../src/lighting/model.c
+  ../../../src/lighting/effects.c
 )
 zephyr_ld_options(-Wl,--wrap=zmk_hid_mouse_clear)

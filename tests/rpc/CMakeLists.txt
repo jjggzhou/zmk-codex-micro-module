@@ -12,6 +12,7 @@ execute_process(
 target_include_directories(app PRIVATE
   "${ZMK_SOURCE_DIR}/app/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../src/protocol"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../src/state"
 )
 
 target_sources(app PRIVATE
@@ -20,4 +21,7 @@ target_sources(app PRIVATE
   ../../src/protocol/json_value.c
   ../../src/protocol/rpc.c
   ../../src/protocol/device_status.c
+  ../../src/lighting/model.c
+  ../../src/lighting/effects.c
+  ../../src/state/indicators.c
 )

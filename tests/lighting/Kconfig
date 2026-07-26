@@ -1,0 +1,3 @@
+mainmenu "Codex lighting tests"
+
+source "Kconfig.zephyr"

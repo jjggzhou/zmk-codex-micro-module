@@ -14,6 +14,7 @@
 #endif
 #define CODEX_RPC_ERROR_FORBIDDEN 403
 #define CODEX_RPC_ERROR_METHOD_NOT_FOUND 404
+#define CODEX_RPC_ERROR_INVALID_PARAMS 400
 
 struct codex_device_status {
     const char *version;

@@ -1,4 +1,5 @@
 #include <codex/rpc.h>
+#include <codex/lighting.h>
 
 #include "json_value.h"
 
@@ -7,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 
 #define RPC_MAX_TOP_LEVEL_FIELDS 32U
@@ -24,6 +26,7 @@ enum rpc_dialect {
 struct request {
     struct span method;
     struct span id;
+    struct span params;
     bool has_id;
     bool has_jsonrpc;
     bool has_compact_method;
@@ -38,6 +41,14 @@ struct writer {
     size_t len;
     int error;
 };
+
+/*
+ * Keep response construction off the system-workqueue stack while allowing an
+ * emitter to synchronously re-enter dispatch. Each occupied slab block owns
+ * its bytes until that emitter returns; exhaustion fails without blocking.
+ */
+K_MEM_SLAB_DEFINE_STATIC(rpc_writer_slab, sizeof(struct writer), 2,
+                         __alignof__(struct writer));
 
 enum method_kind {
     METHOD_SYS_VERSION,
@@ -315,11 +326,13 @@ static int parse_request(const uint8_t *json, size_t len, struct request *reques
                 return -EINVAL;
             }
             request->has_compact_params = true;
+            request->params = value;
         } else if (string_equals_literal(key, "params")) {
             if (request->has_standard_params || !span_is_params(value)) {
                 return -EINVAL;
             }
             request->has_standard_params = true;
+            request->params = value;
         } else if (string_equals_literal(key, "id")) {
             if (request->has_id || !span_is_id(value)) {
                 return -EINVAL;
@@ -580,11 +593,45 @@ int codex_rpc_test_emit_json_cstr(const char *value, size_t maximum_len,
 }
 #endif
 
+static int emit_dispatch_response(enum codex_transport source,
+                                  const struct request *request,
+                                  enum method_kind kind, const char *canonical,
+                                  bool invalid_params, codex_rpc_emit_t emit,
+                                  void *ctx)
+{
+    struct writer *writer;
+    int err;
+
+    err = k_mem_slab_alloc(&rpc_writer_slab, (void **)&writer, K_NO_WAIT);
+    if (err != 0) {
+        return err;
+    }
+    memset(writer, 0, sizeof(*writer));
+    if (invalid_params) {
+        write_error(writer, CODEX_RPC_ERROR_INVALID_PARAMS,
+                    "Invalid params", request->id, request->dialect);
+    } else if (kind == METHOD_UNKNOWN) {
+        write_error(writer, CODEX_RPC_ERROR_METHOD_NOT_FOUND,
+                    "Method not found", request->id, request->dialect);
+    } else if (kind == METHOD_FORBIDDEN) {
+        write_error(writer, CODEX_RPC_ERROR_FORBIDDEN, "Method forbidden",
+                    request->id, request->dialect);
+    } else {
+        write_success(writer, kind, canonical, request->id,
+                      request->dialect);
+    }
+    err = writer->error;
+    if (err == 0) {
+        err = emit(source, writer->data, writer->len, ctx);
+    }
+    k_mem_slab_free(&rpc_writer_slab, writer);
+    return err;
+}
+
 int codex_rpc_dispatch(enum codex_transport source, const uint8_t *json,
                        size_t len, codex_rpc_emit_t emit, void *ctx)
 {
     struct request request = {0};
-    struct writer writer = {0};
     const char *canonical = NULL;
     enum method_kind kind;
     int err;
@@ -601,20 +648,29 @@ int codex_rpc_dispatch(enum codex_transport source, const uint8_t *json,
         return err;
     }
     kind = identify_method(request.method, &canonical);
+    if (kind == METHOD_RGB_CONFIG || kind == METHOD_AGENT_STATUS) {
+        bool has_params = request.dialect == RPC_DIALECT_COMPACT
+                              ? request.has_compact_params
+                              : request.has_standard_params;
+
+        err = has_params
+                  ? (kind == METHOD_RGB_CONFIG
+                         ? codex_lighting_apply_rgbcfg(request.params.data,
+                                                      request.params.len)
+                         : codex_lighting_apply_thstatus(request.params.data,
+                                                        request.params.len))
+                  : -EINVAL;
+        if (err != 0) {
+            if (!request.has_id) {
+                return err;
+            }
+            return emit_dispatch_response(source, &request, kind, canonical,
+                                          true, emit, ctx);
+        }
+    }
     if (!request.has_id) {
         return 0;
     }
-    if (kind == METHOD_UNKNOWN) {
-        write_error(&writer, CODEX_RPC_ERROR_METHOD_NOT_FOUND, "Method not found",
-                    request.id, request.dialect);
-    } else if (kind == METHOD_FORBIDDEN) {
-        write_error(&writer, CODEX_RPC_ERROR_FORBIDDEN, "Method forbidden",
-                    request.id, request.dialect);
-    } else {
-        write_success(&writer, kind, canonical, request.id, request.dialect);
-    }
-    if (writer.error != 0) {
-        return writer.error;
-    }
-    return emit(source, writer.data, writer.len, ctx);
+    return emit_dispatch_response(source, &request, kind, canonical, false,
+                                  emit, ctx);
 }

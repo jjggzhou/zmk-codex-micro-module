@@ -1,0 +1,6 @@
+tests:
+  codex.lighting:
+    platform_allow: native_posix_64
+    tags:
+      - codex
+      - lighting
