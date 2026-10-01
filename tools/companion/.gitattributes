@@ -1,0 +1,3 @@
+# Keep the companion's text files stable under Git for Windows autocrlf.
+# This rule is intentionally scoped to this directory, not existing firmware.
+* text=auto eol=lf

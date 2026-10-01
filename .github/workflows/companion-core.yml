@@ -14,25 +14,60 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: tools/companion
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: 'stable'
           cache: false
-      - name: Formatting
-        run: test -z "$(gofmt -l src cmd tests)"
+      - name: Record verification environment
+        run: |
+          git rev-parse HEAD
+          go version
+          go env GOOS GOARCH
+      - name: Formatting and line endings
+        run: |
+          git ls-files --eol src cmd tests
+          unformatted="$(gofmt -l src cmd tests)"
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            gofmt -d src cmd tests
+            exit 1
+          fi
       - run: go vet ./...
-      - run: go test -count=1 ./...
-      - name: Race detector
+      - name: Tests with machine-readable evidence
+        run: go test -json -count=1 ./... | tee "$RUNNER_TEMP/companion-tests.jsonl"
+      - name: Race detector repeated 20 times
         if: runner.os == 'Linux'
-        run: go test -race -count=1 ./...
+        run: go test -race -count=20 ./...
+      - name: Core coverage
+        if: runner.os == 'Linux'
+        run: |
+          go test -count=1 -coverpkg=./src -coverprofile="$RUNNER_TEMP/companion.coverage" ./...
+          go tool cover -func="$RUNNER_TEMP/companion.coverage"
+      - name: Cross-compile four simulation binaries
+        if: runner.os == 'Linux'
+        env:
+          CGO_ENABLED: '0'
+          GOPROXY: 'off'
+        run: |
+          mkdir -p "$RUNNER_TEMP/companion-dist"
+          for os in darwin windows; do
+            for arch in amd64 arm64; do
+              output="$RUNNER_TEMP/companion-dist/codex-micro-runtime-$os-$arch"
+              if [ "$os" = windows ]; then output="$output.exe"; fi
+              GOOS="$os" GOARCH="$arch" go build -trimpath -o "$output" ./cmd/codex-micro-runtime
+              file "$output"
+              sha256sum "$output"
+            done
+          done
       - run: go build ./cmd/codex-micro-runtime
-      - run: go run ./cmd/codex-micro-runtime demo --scenario reset --offsets 0,30,32
+      - name: Simulate reset without inventing replenished quota
+        run: go run ./cmd/codex-micro-runtime demo --scenario reset --offsets 0,30,32
