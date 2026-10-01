@@ -1,0 +1,38 @@
+name: Companion core
+on:
+  pull_request:
+    paths:
+      - 'tools/companion/**'
+      - '.github/workflows/companion-core.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tools/companion
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 'stable'
+          cache: false
+      - name: Formatting
+        run: test -z "$(gofmt -l src cmd tests)"
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - name: Race detector
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 ./...
+      - run: go build ./cmd/codex-micro-runtime
+      - run: go run ./cmd/codex-micro-runtime demo --scenario reset --offsets 0,30,32

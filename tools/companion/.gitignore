@@ -1,0 +1,6 @@
+/bin/
+/dist/
+/codex-micro-runtime
+/codex-micro-runtime.exe
+*.test
+coverage.out
